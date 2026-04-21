@@ -38,7 +38,7 @@ def test_call_claude_returns_message_shape():
     assert msg["content"] == [{"type": "text", "text": "hi"}]
 
 
-def test_call_claude_passes_system_and_tools():
+def test_call_claude_passes_system_and_tools_raw_when_cache_off():
     client = _fake_client([{"type": "text", "text": "ok"}])
     run(
         call_claude(
@@ -46,11 +46,13 @@ def test_call_claude_passes_system_and_tools():
             system="you are terse",
             tools=[{"name": "bash", "description": "run", "input_schema": {}}],
             client=client,
+            cache=False,
         )
     )
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["system"] == "you are terse"
     assert kwargs["tools"][0]["name"] == "bash"
+    assert "cache_control" not in kwargs["tools"][0]
     assert "max_tokens" in kwargs
     assert kwargs["messages"][0]["content"] == "x"
 
@@ -60,6 +62,75 @@ def test_call_claude_omits_system_when_blank():
     run(call_claude([{"role": "user", "content": "x"}], client=client))
     kwargs = client.messages.create.call_args.kwargs
     assert "system" not in kwargs
+
+
+def test_cache_wraps_system_as_block_with_cache_control():
+    client = _fake_client([{"type": "text", "text": "ok"}])
+    run(
+        call_claude(
+            [{"role": "user", "content": "hi"}],
+            system="SYS",
+            client=client,
+            cache=True,
+        )
+    )
+    sys_arg = client.messages.create.call_args.kwargs["system"]
+    assert isinstance(sys_arg, list)
+    assert sys_arg[0]["type"] == "text"
+    assert sys_arg[0]["text"] == "SYS"
+    assert sys_arg[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_cache_marks_last_tool_only():
+    client = _fake_client([{"type": "text", "text": "ok"}])
+    tools = [
+        {"name": "a", "description": "A", "input_schema": {}},
+        {"name": "b", "description": "B", "input_schema": {}},
+        {"name": "c", "description": "C", "input_schema": {}},
+    ]
+    run(call_claude([{"role": "user", "content": "x"}], tools=tools, client=client, cache=True))
+    sent = client.messages.create.call_args.kwargs["tools"]
+    assert "cache_control" not in sent[0]
+    assert "cache_control" not in sent[1]
+    assert sent[2]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_cache_marks_last_message_promoting_string_to_block():
+    client = _fake_client([{"type": "text", "text": "ok"}])
+    run(call_claude([{"role": "user", "content": "hello"}], client=client, cache=True))
+    msgs = client.messages.create.call_args.kwargs["messages"]
+    content = msgs[-1]["content"]
+    assert isinstance(content, list)
+    assert content[-1]["text"] == "hello"
+    assert content[-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_cache_marks_last_block_of_list_content():
+    client = _fake_client([{"type": "text", "text": "ok"}])
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "done"},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "also done"},
+            ],
+        }
+    ]
+    run(call_claude(messages, client=client, cache=True))
+    sent = client.messages.create.call_args.kwargs["messages"]
+    content = sent[-1]["content"]
+    assert "cache_control" not in content[0]
+    assert content[-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_cache_does_not_mutate_caller_inputs():
+    """caller passes messages/tools; we must not scribble on them."""
+    client = _fake_client([{"type": "text", "text": "ok"}])
+    tools = [{"name": "a", "description": "A", "input_schema": {}}]
+    messages = [{"role": "user", "content": "x"}]
+    run(call_claude(messages, tools=tools, client=client, cache=True))
+    assert "cache_control" not in tools[0]
+    assert messages[0]["content"] == "x"  # still a string
 
 
 @pytest.mark.skipif(
