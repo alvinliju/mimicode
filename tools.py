@@ -5,10 +5,39 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from logger import log
+
 # strips CSI/OSC escape sequences. covers the 99% case for normal CLI output.
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
 MAX_OUTPUT_BYTES = 100_000  # ~100KB, anything beyond is tail-truncated
 DEFAULT_READ_LINES = 2000  # default line cap for read(). match pi/claude code.
+
+# pre-flight guardrail: patterns we refuse to run. each entry is (regex, reason).
+# order matters — first match wins. we match command-name positions only
+# (start of command or after |/;/&) to avoid false positives from quoted args.
+_CMD_HEAD = r"(?:^|[|&;])\s*"  # command begins here
+_BANNED: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(_CMD_HEAD + r"find\s+"),
+     "use `rg --files` (respects .gitignore) instead of `find`"),
+    (re.compile(_CMD_HEAD + r"grep\s+-[rR]\b"),
+     "use `rg 'pattern'` instead of `grep -r`"),
+    (re.compile(_CMD_HEAD + r"ls\s+-R\b"),
+     "use `rg --files` instead of `ls -R`"),
+    (re.compile(_CMD_HEAD + r"cat\s+\S+\.(?:py|js|ts|tsx|jsx|go|rs|rb|java|c|cc|cpp|h|hpp|md|json|ya?ml|toml)\b"),
+     "use the `read` tool (not `cat`) for code/config files"),
+    (re.compile(r"\bcurl\s+[^|]*\|\s*(?:sh|bash)\b"),
+     "refusing: `curl | sh` is unsafe"),
+    (re.compile(_CMD_HEAD + r"rm\s+-rf?\s+(?:/|~|\*\s*$)"),
+     "refusing: `rm -rf` on a dangerous target (/, ~, *)"),
+)
+
+
+def vet(cmd: str) -> str | None:
+    """pre-flight check. returns a hint string if cmd is blocked, else None."""
+    for pat, msg in _BANNED:
+        if pat.search(cmd):
+            return msg
+    return None
 
 
 def _clean(raw: bytes) -> str:
@@ -54,7 +83,12 @@ async def _kill(proc: asyncio.subprocess.Process) -> None:
 
 async def bash(cmd: str, cwd: str = ".", timeout: float | None = None) -> ToolResult:
     """run a shell command. combined stdout+stderr, ANSI stripped, tail-truncated.
-    honors asyncio cancellation. kills the process on timeout or abort."""
+    honors asyncio cancellation. kills the process on timeout or abort.
+    pre-flight: vets against banned patterns (find, grep -r, etc.)."""
+    hint = vet(cmd)
+    if hint is not None:
+        log("cmd_blocked", {"cmd": cmd[:200], "hint": hint})
+        return ToolResult(output=f"[blocked] {hint}", is_error=True)
     proc = await asyncio.create_subprocess_shell(
         cmd,
         stdout=asyncio.subprocess.PIPE,
