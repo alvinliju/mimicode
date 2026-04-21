@@ -4,30 +4,49 @@ import os
 import sys
 from datetime import date
 
-from logger import log
+from logger import log, start_session
 from providers import call_claude
 from tools import bash, edit, read, write
 
-SYSTEM_PROMPT = """You are an expert coding assistant operating in a minimal harness called mimicode.
-You help users with coding tasks by reading files, executing commands, editing code, and writing new files.
+SYSTEM_PROMPT = """You are a coding agent in a minimal harness called mimicode.
+You have four tools: read, bash, edit, write. Use them deliberately.
 
-Available tools:
-- read: Read file contents (with line numbers)
-- bash: Execute a bash command
-- edit: Surgical find/replace (old_text must match exactly once)
-- write: Create or overwrite a file
+SEARCH RULES (non-negotiable):
+- Use `rg` (ripgrep) for every search. rg respects .gitignore by default.
+- List files:          rg --files                  (not `find .` or `ls -R`)
+- List by extension:   rg --files -t py            (not `find . -name '*.py'`)
+- Search content:      rg 'pattern'                (not `grep -r`)
+- Scope to a dir:      rg 'pattern' path/
+- Case-insensitive:    rg -i 'pattern'
+- With line numbers:   rg -n 'pattern'             (on by default for content search)
+- List matching files: rg -l 'pattern'
+Never run `find`, `grep -r`, `ls -R`, or `cat <codefile>`. Use the `read` tool for code files.
 
-Guidelines:
-- Use bash for exploration: ls, rg, find, grep
-- Use read before editing
-- Use edit for precise changes; write only for new files or full rewrites
-- Be concise
-- Show file paths clearly"""
+ALWAYS EXCLUDE from exploration: .venv/ .git/ node_modules/ sessions/ __pycache__/ dist/ build/ .pytest_cache/
+
+EDITING RULES:
+- `read` before `edit`. Always.
+- `edit` requires old_text to match exactly once. Include 2-3 lines of surrounding context so the match is unique.
+- `write` only for new files or full rewrites. Never for partial changes.
+
+STYLE:
+- Prefer one targeted tool call over a broad one. Scope searches.
+- Tool output is capped at 100KB. If you hit that, your scope was too wide.
+- Be concise. Cite file:line where relevant."""
 
 TOOLS = [
     {
         "name": "bash",
-        "description": "Execute a bash command. Returns combined stdout+stderr.",
+        "description": (
+            "Execute a shell command. Returns combined stdout+stderr, ANSI-stripped, "
+            "tail-truncated at 100KB.\n\n"
+            "SCOPING IS MANDATORY. A command that returns >50KB is almost always wrong — "
+            "narrow it. Use `rg` for all search/listing. `find`, `grep -r`, `ls -R`, and "
+            "`cat <codefile>` are BLOCKED by the harness and will return an error.\n\n"
+            "Prefer: `rg --files`, `rg --files -t py`, `rg -l 'pat'`, `rg 'pat' path/`. "
+            "Use the `read` tool (not `cat`) for code files.\n\n"
+            "Respects .gitignore via rg. Never scans .venv/, .git/, node_modules/, sessions/."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -137,7 +156,9 @@ def main() -> None:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("error: ANTHROPIC_API_KEY not set", file=sys.stderr)
         sys.exit(1)
-    log("session_start", {"cwd": os.getcwd()})
+    sess = start_session()
+    log("session_start", {"cwd": os.getcwd(), "prompt_chars": len(prompt)})
+    print(f"[mimicode] session {sess.id} -> {sess.path}", file=sys.stderr)
     messages = asyncio.run(agent_turn(prompt, cwd=os.getcwd()))
     _print_final(messages)
 
