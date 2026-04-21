@@ -1,7 +1,7 @@
 """tests for tools.py."""
 import asyncio
 
-from tools import MAX_OUTPUT_BYTES, bash, read, write
+from tools import MAX_OUTPUT_BYTES, bash, edit, read, write
 
 
 def run(coro):
@@ -159,3 +159,51 @@ def test_write_concurrent_same_path_serializes(tmp_path):
     content = f.read_text()
     assert content.startswith("value-")
     assert content.split("-")[1].isdigit()
+
+
+def test_edit_unique_match(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text("x = 1\ny = 2\nz = 3\n")
+    r = run(edit(str(f), "y = 2", "y = 42"))
+    assert r.is_error is False
+    assert f.read_text() == "x = 1\ny = 42\nz = 3\n"
+    assert "line 2" in r.output
+
+
+def test_edit_not_found(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text("hello")
+    r = run(edit(str(f), "goodbye", "bye"))
+    assert r.is_error is True
+    assert "not found" in r.output
+    assert f.read_text() == "hello"  # unchanged
+
+
+def test_edit_ambiguous_multiple_matches(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text("a\na\na\n")
+    r = run(edit(str(f), "a", "b"))
+    assert r.is_error is True
+    assert "3 times" in r.output
+    assert f.read_text() == "a\na\na\n"  # unchanged
+
+
+def test_edit_missing_file():
+    r = run(edit("/no/such/file", "x", "y"))
+    assert r.is_error is True
+
+
+def test_edit_identical_is_error(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text("hi")
+    r = run(edit(str(f), "hi", "hi"))
+    assert r.is_error is True
+
+
+def test_edit_multiline(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text("def foo():\n    return 1\n\ndef bar():\n    return 2\n")
+    r = run(edit(str(f), "def foo():\n    return 1", "def foo():\n    return 99"))
+    assert r.is_error is False
+    assert "return 99" in f.read_text()
+    assert "return 2" in f.read_text()

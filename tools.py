@@ -142,3 +142,30 @@ async def write(path: str, content: str, cwd: str = ".") -> ToolResult:
         except OSError as e:
             return ToolResult(output=f"[error] {e}", is_error=True)
     return ToolResult(output=f"wrote {len(content)} bytes to {path}")
+
+
+async def edit(path: str, old_text: str, new_text: str, cwd: str = ".") -> ToolResult:
+    """surgical replace. old_text must match exactly once. serialized per path."""
+    if old_text == new_text:
+        return ToolResult(output="[error] old_text and new_text are identical", is_error=True)
+    abs_path = _resolve(path, cwd)
+    lock = _file_locks[str(abs_path)]
+    async with lock:
+        if not abs_path.exists():
+            return ToolResult(output=f"[error] not found: {path}", is_error=True)
+        try:
+            original = abs_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return ToolResult(output=f"[error] binary file: {path}", is_error=True)
+        count = original.count(old_text)
+        if count == 0:
+            return ToolResult(output=f"[error] old_text not found in {path}", is_error=True)
+        if count > 1:
+            return ToolResult(
+                output=f"[error] old_text matches {count} times in {path}; make it unique",
+                is_error=True,
+            )
+        updated = original.replace(old_text, new_text, 1)
+        abs_path.write_text(updated, encoding="utf-8")
+        line = original[: original.index(old_text)].count("\n") + 1
+    return ToolResult(output=f"edited {path} at line {line}")
