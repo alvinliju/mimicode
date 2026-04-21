@@ -145,6 +145,9 @@ async def _dispatch(name: str, args: dict, cwd: str):
         return ToolResult(output=f"[error] unknown tool: {name}", is_error=True)
     log("tool_call", {"name": name, "args_keys": list(args.keys())})
     result = await fn(cwd=cwd, **args)
+    # invariant: anthropic rejects tool_result with is_error=true and empty content.
+    if result.is_error and not result.output:
+        result.output = "[error] (no output)"
     log("tool_result", {"name": name, "is_error": result.is_error, "bytes": len(result.output)})
     return result
 

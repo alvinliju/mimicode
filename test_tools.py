@@ -279,3 +279,34 @@ def test_bash_still_runs_legal_commands():
     r = run(bash("echo hello && echo world"))
     assert r.is_error is False
     assert "hello" in r.output and "world" in r.output
+
+
+# ---------- invariant: is_error=True implies non-empty content ----------
+# anthropic's API rejects tool_result blocks that have is_error=true with
+# empty content. these cover the common silent-failure cases.
+
+def test_bash_silent_exit_nonzero_has_content():
+    r = run(bash("exit 3"))
+    assert r.is_error is True
+    assert r.output != ""
+    assert "3" in r.output
+
+
+def test_bash_timeout_no_output_has_content():
+    r = run(bash("sleep 10", timeout=0.1))
+    assert r.is_error is True and r.timed_out is True
+    assert r.output != ""
+    assert "timeout" in r.output.lower()
+
+
+def test_bash_grep_no_match_has_content():
+    """grep exits 1 silently when there's no match — common trap."""
+    r = run(bash("echo hello | grep zzzzz"))
+    assert r.is_error is True
+    assert r.output != ""
+
+
+def test_bash_which_missing_has_content():
+    r = run(bash("which definitely_not_a_real_binary_xyz123"))
+    assert r.is_error is True
+    assert r.output != ""

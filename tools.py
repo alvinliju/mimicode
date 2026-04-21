@@ -108,9 +108,20 @@ async def bash(cmd: str, cwd: str = ".", timeout: float | None = None) -> ToolRe
         await _kill(proc)
         raise  # propagate cancellation after cleanup
     output, truncated = _truncate(_clean(stdout))
+    rc = proc.returncode
+    is_error = timed_out or aborted or (rc not in (0, None))
+    # anthropic rejects tool_result with is_error=true and empty content.
+    # synthesize a reason so the model has something to work with.
+    if is_error and not output:
+        if timed_out:
+            output = f"[timeout after {timeout}s, no output]"
+        elif aborted:
+            output = "[aborted, no output]"
+        else:
+            output = f"[exit {rc}, no output]"
     return ToolResult(
         output=output,
-        is_error=timed_out or aborted or (proc.returncode not in (0, None)),
+        is_error=is_error,
         truncated=truncated,
         timed_out=timed_out,
         aborted=aborted,
