@@ -1,6 +1,7 @@
 """the four tools. bash, read, write, edit. nothing else."""
 import asyncio
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -119,3 +120,25 @@ async def read(
     if truncated:
         numbered += f"\n[... showing lines {start + 1}-{end} of {total}; use offset/limit for more]"
     return ToolResult(output=numbered or "[empty file]", truncated=truncated)
+
+
+# per-path mutation queue: serialize concurrent writes/edits to the same file.
+_file_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def _resolve(path: str, cwd: str) -> Path:
+    p = Path(path)
+    return p.resolve() if p.is_absolute() else (Path(cwd) / p).resolve()
+
+
+async def write(path: str, content: str, cwd: str = ".") -> ToolResult:
+    """create or overwrite a file. creates parent dirs. serialized per absolute path."""
+    abs_path = _resolve(path, cwd)
+    lock = _file_locks[str(abs_path)]
+    async with lock:
+        try:
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_text(content, encoding="utf-8")
+        except OSError as e:
+            return ToolResult(output=f"[error] {e}", is_error=True)
+    return ToolResult(output=f"wrote {len(content)} bytes to {path}")

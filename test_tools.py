@@ -1,7 +1,7 @@
 """tests for tools.py."""
 import asyncio
 
-from tools import MAX_OUTPUT_BYTES, bash, read
+from tools import MAX_OUTPUT_BYTES, bash, read, write
 
 
 def run(coro):
@@ -125,3 +125,37 @@ def test_read_cwd_resolves_relative(tmp_path):
     r = run(read("rel.txt", cwd=str(tmp_path)))
     assert "hi" in r.output
     assert r.is_error is False
+
+
+def test_write_creates_file(tmp_path):
+    f = tmp_path / "new.txt"
+    r = run(write(str(f), "hello"))
+    assert r.is_error is False
+    assert f.read_text() == "hello"
+
+
+def test_write_overwrites(tmp_path):
+    f = tmp_path / "x.txt"
+    f.write_text("old")
+    run(write(str(f), "new"))
+    assert f.read_text() == "new"
+
+
+def test_write_creates_parent_dirs(tmp_path):
+    f = tmp_path / "a" / "b" / "c.txt"
+    r = run(write(str(f), "deep"))
+    assert r.is_error is False
+    assert f.read_text() == "deep"
+
+
+def test_write_concurrent_same_path_serializes(tmp_path):
+    f = tmp_path / "race.txt"
+
+    async def burst():
+        await asyncio.gather(*[write(str(f), f"value-{i}") for i in range(50)])
+
+    run(burst())
+    # last-writer-wins semantics, but crucially file must exist and be one of the values
+    content = f.read_text()
+    assert content.startswith("value-")
+    assert content.split("-")[1].isdigit()
