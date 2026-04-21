@@ -38,3 +38,33 @@ def test_log_with_no_data():
     lines = logger.LOG_PATH.read_text().splitlines()
     assert json.loads(lines[0])["data"] == {}
     logger.LOG_PATH.unlink()
+
+
+def test_start_session_rotates_to_new_file():
+    logger = fresh_logger()
+    first_id = logger.SESSION_ID
+    logger.log("from_first", {})
+    first_path = logger.LOG_PATH
+
+    logger.start_session()
+    assert logger.SESSION_ID != first_id
+    assert logger.LOG_PATH != first_path
+    logger.log("from_second", {})
+
+    assert first_path.read_text().count("from_first") == 1
+    assert logger.LOG_PATH.read_text().count("from_second") == 1
+    assert "from_second" not in first_path.read_text()
+
+    first_path.unlink()
+    logger.LOG_PATH.unlink()
+
+
+def test_start_session_accepts_explicit_id():
+    logger = fresh_logger()
+    sess = logger.start_session("myrun123")
+    assert sess.id == "myrun123"
+    assert logger.SESSION_ID == "myrun123"
+    assert logger.LOG_PATH.name == "myrun123.jsonl"
+    logger.log("hello")
+    assert "hello" in logger.LOG_PATH.read_text()
+    logger.LOG_PATH.unlink()
