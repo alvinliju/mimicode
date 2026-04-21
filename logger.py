@@ -58,6 +58,11 @@ def log(kind: str, data: dict | None = None) -> None:
     _current.log(kind, data)
 
 
+def event_count(session_path: Path) -> int:
+    """return the number of events in a session file."""
+    return len(session_path.read_text().splitlines())
+
+
 # back-compat: module-level names test_logger.py and older code import.
 SESSION_ID = _current.id
 SESSION_START = _current.start

@@ -68,3 +68,11 @@ def test_start_session_accepts_explicit_id():
     logger.log("hello")
     assert "hello" in logger.LOG_PATH.read_text()
     logger.LOG_PATH.unlink()
+
+
+def test_event_count():
+    logger = fresh_logger()
+    logger.log("first", {"a": 1})
+    logger.log("second", {"b": 2})
+    assert logger.event_count(logger.LOG_PATH) == 2
+    logger.LOG_PATH.unlink()
