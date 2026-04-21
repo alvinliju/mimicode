@@ -30,16 +30,51 @@ class ToolResult:
     output: str
     is_error: bool = False
     truncated: bool = False
+    timed_out: bool = False
+    aborted: bool = False
 
 
-async def bash(cmd: str, cwd: str = ".") -> ToolResult:
-    """run a shell command. combined stdout+stderr, ANSI stripped, tail-truncated."""
+async def _kill(proc: asyncio.subprocess.Process) -> None:
+    """try terminate, then kill. never raise."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=0.5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+    except ProcessLookupError:
+        pass
+
+
+async def bash(cmd: str, cwd: str = ".", timeout: float | None = None) -> ToolResult:
+    """run a shell command. combined stdout+stderr, ANSI stripped, tail-truncated.
+    honors asyncio cancellation. kills the process on timeout or abort."""
     proc = await asyncio.create_subprocess_shell(
         cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=cwd,
     )
-    stdout, _ = await proc.communicate()
+    timed_out = False
+    aborted = False
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        timed_out = True
+        await _kill(proc)
+        stdout = b""
+    except asyncio.CancelledError:
+        aborted = True
+        await _kill(proc)
+        raise  # propagate cancellation after cleanup
     output, truncated = _truncate(_clean(stdout))
-    return ToolResult(output=output, is_error=proc.returncode != 0, truncated=truncated)
+    return ToolResult(
+        output=output,
+        is_error=timed_out or aborted or (proc.returncode not in (0, None)),
+        truncated=truncated,
+        timed_out=timed_out,
+        aborted=aborted,
+    )

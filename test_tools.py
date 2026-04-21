@@ -44,3 +44,24 @@ def test_bash_truncates_huge_output():
     assert r.truncated is True
     assert len(r.output.encode()) <= MAX_OUTPUT_BYTES + 200  # +header
     assert "truncated" in r.output
+
+
+def test_bash_timeout_kills_long_process():
+    r = run(bash("sleep 10", timeout=0.3))
+    assert r.timed_out is True
+    assert r.is_error is True
+
+
+def test_bash_cancel_kills_long_process():
+    async def outer():
+        task = asyncio.create_task(bash("sleep 10"))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # give the kernel a moment; if cleanup is wrong, a zombie sleep persists
+        await asyncio.sleep(0.2)
+
+    run(outer())  # if we got here without hanging, we're good
