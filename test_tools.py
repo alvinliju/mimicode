@@ -1,7 +1,7 @@
 """tests for tools.py."""
 import asyncio
 
-from tools import MAX_OUTPUT_BYTES, bash
+from tools import MAX_OUTPUT_BYTES, bash, read
 
 
 def run(coro):
@@ -65,3 +65,63 @@ def test_bash_cancel_kills_long_process():
         await asyncio.sleep(0.2)
 
     run(outer())  # if we got here without hanging, we're good
+
+
+def test_read_basic(tmp_path):
+    f = tmp_path / "x.txt"
+    f.write_text("line1\nline2\nline3\n")
+    r = run(read(str(f)))
+    assert "line1" in r.output
+    assert "line3" in r.output
+    assert r.is_error is False
+    assert r.truncated is False
+    # lines are numbered
+    assert "     1|line1" in r.output
+
+
+def test_read_missing():
+    r = run(read("/no/such/file/xyz"))
+    assert r.is_error is True
+    assert "not found" in r.output
+
+
+def test_read_directory_is_error(tmp_path):
+    r = run(read(str(tmp_path)))
+    assert r.is_error is True
+
+
+def test_read_binary_rejected(tmp_path):
+    f = tmp_path / "bin.dat"
+    f.write_bytes(b"abc\x00def")
+    r = run(read(str(f)))
+    assert r.is_error is True
+    assert "binary" in r.output
+
+
+def test_read_offset_and_limit(tmp_path):
+    f = tmp_path / "big.txt"
+    f.write_text("\n".join(f"line{i}" for i in range(1, 101)))
+    r = run(read(str(f), offset=10, limit=5))
+    assert r.truncated is True
+    assert "line10" in r.output
+    assert "line14" in r.output
+    assert "line15" not in r.output
+    assert "line9" not in r.output
+
+
+def test_read_default_caps_at_2000_lines(tmp_path):
+    f = tmp_path / "huge.txt"
+    f.write_text("\n".join("x" for _ in range(3000)))
+    r = run(read(str(f)))
+    assert r.truncated is True
+    # last numbered line shown should be 2000
+    assert "  2000|" in r.output
+    assert "  2001|" not in r.output
+
+
+def test_read_cwd_resolves_relative(tmp_path):
+    f = tmp_path / "rel.txt"
+    f.write_text("hi")
+    r = run(read("rel.txt", cwd=str(tmp_path)))
+    assert "hi" in r.output
+    assert r.is_error is False

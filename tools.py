@@ -2,10 +2,12 @@
 import asyncio
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 # strips CSI/OSC escape sequences. covers the 99% case for normal CLI output.
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
 MAX_OUTPUT_BYTES = 100_000  # ~100KB, anything beyond is tail-truncated
+DEFAULT_READ_LINES = 2000  # default line cap for read(). match pi/claude code.
 
 
 def _clean(raw: bytes) -> str:
@@ -78,3 +80,42 @@ async def bash(cmd: str, cwd: str = ".", timeout: float | None = None) -> ToolRe
         timed_out=timed_out,
         aborted=aborted,
     )
+
+
+def _looks_binary(sample: bytes) -> bool:
+    """heuristic: NUL byte in the first 8KB => binary."""
+    return b"\x00" in sample
+
+
+async def read(
+    path: str,
+    cwd: str = ".",
+    offset: int = 1,
+    limit: int | None = None,
+) -> ToolResult:
+    """read a text file. 1-indexed line offset + optional limit.
+    refuses binary files. defaults to first 2000 lines.
+    returns output prefixed with line numbers, truncation marker if capped."""
+    abs_path = (Path(cwd) / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+    if not abs_path.exists():
+        return ToolResult(output=f"[error] not found: {path}", is_error=True)
+    if abs_path.is_dir():
+        return ToolResult(output=f"[error] is a directory: {path}", is_error=True)
+
+    with abs_path.open("rb") as f:
+        head = f.read(8192)
+    if _looks_binary(head):
+        return ToolResult(output=f"[error] binary file: {path}", is_error=True)
+
+    text = abs_path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    total = len(lines)
+    start = max(0, offset - 1)
+    cap = limit if limit is not None else DEFAULT_READ_LINES
+    end = min(total, start + cap)
+    selected = lines[start:end]
+    numbered = "\n".join(f"{start + i + 1:6d}|{line}" for i, line in enumerate(selected))
+    truncated = end < total
+    if truncated:
+        numbered += f"\n[... showing lines {start + 1}-{end} of {total}; use offset/limit for more]"
+    return ToolResult(output=numbered or "[empty file]", truncated=truncated)
