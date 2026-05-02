@@ -1,1 +1,36 @@
-[]
+[
+  {
+    "id": "tui-component",
+    "type": "component",
+    "file": "components/tui.json",
+    "tags": [
+      "keyboard-shortcuts",
+      "interrupt",
+      "ux-improvement"
+    ],
+    "summary": "Updated keyboard interrupt behavior: Ctrl+C kills process and clears prompt, Esc kills process but keeps prompt"
+  },
+  {
+    "id": "streaming-component",
+    "type": "component",
+    "file": "components/streaming.json",
+    "tags": [
+      "streaming",
+      "real-time",
+      "ux-improvement",
+      "async"
+    ],
+    "summary": "Implemented real-time streaming for tool calls and agent responses - tools now appear as they execute, not after completion"
+  },
+  {
+    "id": "agent-prompt-component",
+    "type": "component",
+    "file": "components/agent-prompt.json",
+    "tags": [
+      "system-prompt",
+      "behavior-change",
+      "markdown"
+    ],
+    "summary": "Added explicit rule to prevent AI from creating markdown summary files"
+  }
+]

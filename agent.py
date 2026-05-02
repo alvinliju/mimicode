@@ -22,7 +22,7 @@ from pathlib import Path
 
 from logger import log, start_session
 from mimi_memory import auto_update_session, handle_memory_write, init_memory, load_session_context
-from providers import call_claude
+from providers import call_claude, call_claude_streaming
 from tools import bash, edit, read, write
 
 SYSTEM_PROMPT = """You are a coding agent in a minimal harness called mimicode.
@@ -49,7 +49,8 @@ EDITING RULES:
 STYLE:
 - Prefer one targeted tool call over a broad one. Scope searches.
 - Tool output is capped at 100KB. If you hit that, your scope was too wide.
-- Be concise. Cite file:line where relevant."""
+- Be concise. Cite file:line where relevant.
+- Do NOT create markdown (.md) files to summarize what is happening. Respond directly to the user."""
 
 TOOLS = [
     {
@@ -191,16 +192,21 @@ async def _dispatch(name: str, args: dict, cwd: str, session_id: str | None = No
     return result
 
 
+class AgentInterrupted(Exception):
+    """Raised when a cancel_event is set during agent_turn."""
+
+
 async def agent_turn(
     user_msg: str,
     messages: list[dict] | None = None,
     cwd: str = ".",
     max_steps: int = 25,
     session_id: str | None = None,
+    on_stream_event=None,
+    cancel_event: asyncio.Event | None = None,
 ) -> list[dict]:
-    """run one user turn to completion. appends user_msg to `messages` (or
-    starts fresh if None) and returns the extended list. pass the same list
-    back in next call to continue the conversation."""
+    """run one user turn to completion. returns extended messages list.
+    Set cancel_event to interrupt mid-turn; raises AgentInterrupted."""
     log("user_message", {"chars": len(user_msg), "resumed": bool(messages)})
     if session_id:
         init_memory(session_id)
@@ -209,8 +215,24 @@ async def agent_turn(
     messages.append({"role": "user", "content": user_msg})
     memory_context = load_session_context(session_id) if session_id else ""
     system = build_system(cwd, memory_context)
+
+    def _check_cancel():
+        if cancel_event and cancel_event.is_set():
+            raise AgentInterrupted
+
     for step in range(max_steps):
-        assistant = await call_claude(messages, system=system, tools=TOOLS)
+        _check_cancel()
+
+        if on_stream_event:
+            assistant = await call_claude_streaming(
+                messages, system=system, tools=TOOLS,
+                on_event=on_stream_event, cancel_event=cancel_event,
+            )
+        else:
+            assistant = await call_claude(messages, system=system, tools=TOOLS)
+
+        _check_cancel()
+
         messages.append(assistant)
         tool_uses = [b for b in assistant["content"] if b.get("type") == "tool_use"]
         if not tool_uses:
@@ -218,18 +240,37 @@ async def agent_turn(
             if session_id:
                 auto_update_session(session_id, messages)
             return messages
+
         results = []
         for tu in tool_uses:
+            _check_cancel()
+
+            if on_stream_event:
+                await on_stream_event("tool_exec_start", {
+                    "name": tu["name"],
+                    "args": tu.get("input", {}) or {},
+                })
+
             result = await _dispatch(tu["name"], tu.get("input", {}) or {}, cwd, session_id)
-            results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tu["id"],
-                    "content": result.output,
+
+            _check_cancel()
+
+            if on_stream_event:
+                await on_stream_event("tool_exec_result", {
+                    "name": tu["name"],
+                    "output": result.output,
                     "is_error": result.is_error,
-                }
-            )
+                })
+
+            results.append({
+                "type": "tool_result",
+                "tool_use_id": tu["id"],
+                "content": result.output,
+                "is_error": result.is_error,
+            })
+
         messages.append({"role": "user", "content": results})
+
     log("turn_end", {"steps": max_steps, "reason": "max_steps"})
     if session_id:
         auto_update_session(session_id, messages)

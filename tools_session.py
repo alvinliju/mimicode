@@ -35,7 +35,7 @@ def session_token_usage(session_path: Path) -> dict:
         if not line.strip():
             continue
         event = json.loads(line)
-        if event.get("kind") == "model_response":
+        if event.get("kind") in ("model_response", "model_response_streaming"):
             d = event.get("data", {})
             tokens_in    += d.get("tokens_in", 0)
             tokens_out   += d.get("tokens_out", 0)

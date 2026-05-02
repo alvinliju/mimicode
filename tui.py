@@ -1,4 +1,5 @@
 """TUI for mimicode — pi-style line-by-line chat, multi-line input, live footer."""
+import asyncio
 import os
 import sys
 
@@ -7,39 +8,62 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.message import Message
-from textual.widgets import Label, RichLog, TextArea
+from textual.widgets import Label, RichLog, Static, TextArea
 
-from agent import agent_turn, load_messages, save_messages
+from agent import AgentInterrupted, agent_turn, load_messages, save_messages
 from logger import log, start_session
 from tools_session import all_sessions_token_usage, session_token_usage
 
 # ---------------------------------------------------------------------------
-# Palette — VS Code Dark+ inspired, mirrors pi-code's look
+# Palette — VS Code Dark+ inspired
 # ---------------------------------------------------------------------------
-_BG       = "#1e1e1e"
-_BG2      = "#252526"
-_FG       = "#cccccc"
-_DIM      = "#6a6a6a"
-_USER     = "#569cd6"   # blue
-_BOT      = "#4ec9b0"   # teal
-_TOOL     = "#dcdcaa"   # yellow
-_OK       = "#6a9955"   # green
-_ERR      = "#f44747"   # red
-_ACCENT   = "#007acc"
+_BG     = "#1e1e1e"
+_BG2    = "#252526"
+_FG     = "#cccccc"
+_DIM    = "#6a6a6a"
+_USER   = "#569cd6"
+_BOT    = "#4ec9b0"
+_TOOL   = "#dcdcaa"
+_OK     = "#6a9955"
+_ERR    = "#f44747"
+_ACCENT = "#007acc"
+
+# ---------------------------------------------------------------------------
+# Slash command registry
+# ---------------------------------------------------------------------------
+SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("/help",      "show available commands"),
+    ("/clear",     "clear chat history"),
+    ("/exit",      "exit the application"),
+    ("/usage",     "token usage — this session"),
+    ("/usage all", "token usage — all sessions"),
+]
+
+def _completions(prefix: str) -> list[tuple[str, str]]:
+    p = prefix.lower()
+    return [(cmd, desc) for cmd, desc in SLASH_COMMANDS if cmd.startswith(p)]
 
 
 # ---------------------------------------------------------------------------
-# PromptEditor — TextArea with Enter=submit, Shift+Enter=newline
+# PromptEditor
 # ---------------------------------------------------------------------------
 
 class PromptEditor(TextArea):
-    """Multi-line prompt input. Enter submits; Shift+Enter inserts a newline."""
+    """Multi-line input. Enter=submit, Shift+Enter=newline, Tab=autocomplete."""
 
     class Submitted(Message):
         def __init__(self, editor: "PromptEditor", value: str) -> None:
             self.editor = editor
             self.value = value
             super().__init__()
+
+    class TabPressed(Message):
+        def __init__(self, editor: "PromptEditor") -> None:
+            self.editor = editor
+            super().__init__()
+
+    class InterruptRequested(Message):
+        pass
 
     DEFAULT_CSS = f"""
     PromptEditor {{
@@ -61,7 +85,11 @@ class PromptEditor(TextArea):
     """
 
     def on_key(self, event: events.Key) -> None:
-        if event.key == "enter":
+        if event.key == "ctrl+c":
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.InterruptRequested())
+        elif event.key == "enter":
             event.prevent_default()
             text = self.text.strip()
             if text:
@@ -70,6 +98,51 @@ class PromptEditor(TextArea):
         elif event.key == "shift+enter":
             event.prevent_default()
             self.insert("\n")
+        elif event.key == "tab":
+            event.prevent_default()
+            self.post_message(self.TabPressed(self))
+
+
+# ---------------------------------------------------------------------------
+# AutocompleteBox
+# ---------------------------------------------------------------------------
+
+class AutocompleteBox(Static):
+    """Floating slash-command suggestions shown above the editor."""
+
+    DEFAULT_CSS = f"""
+    AutocompleteBox {{
+        background: {_BG2};
+        border: solid {_ACCENT};
+        padding: 0 1;
+        height: auto;
+        display: none;
+    }}
+    AutocompleteBox.visible {{
+        display: block;
+    }}
+    """
+
+    def show_completions(self, matches: list[tuple[str, str]]) -> None:
+        if not matches:
+            self.remove_class("visible")
+            return
+        lines = Text()
+        for i, (cmd, desc) in enumerate(matches):
+            indicator = " → " if i == 0 else "   "
+            row = Text.assemble(
+                (indicator, f"bold {_USER}"),
+                (f"{cmd:<16}", _FG),
+                (f"  {desc}", _DIM),
+            )
+            lines.append_text(row)
+            if i < len(matches) - 1:
+                lines.append("\n")
+        self.update(lines)
+        self.add_class("visible")
+
+    def hide(self) -> None:
+        self.remove_class("visible")
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +150,7 @@ class PromptEditor(TextArea):
 # ---------------------------------------------------------------------------
 
 class MimicodeApp(App):
-    """Mimicode TUI — pi-style line-by-line layout."""
+    """Mimicode TUI — pi-style layout."""
 
     CSS = f"""
     Screen {{
@@ -114,38 +187,151 @@ class MimicodeApp(App):
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=True),
-        Binding("ctrl+d", "quit", "Quit", show=False),
+        Binding("ctrl+d", "quit", "Quit", show=False, priority=True),
     ]
 
     def __init__(self, session_id: str | None = None) -> None:
         super().__init__()
-        self.session = start_session(session_id)
-        self.messages = load_messages(self.session.path)
-        self.cwd = os.getcwd()
+        self.session      = start_session(session_id)
+        self.messages     = load_messages(self.session.path)
+        self.cwd          = os.getcwd()
         self.is_processing = False
+        self._cancel_event: asyncio.Event = asyncio.Event()
+        self._agent_task: asyncio.Task | None = None
+        self._current_completions: list[tuple[str, str]] = []
+        self._current_text_blocks: dict[int, str] = {}
+        self._current_tool_blocks: dict[int, dict] = {}
 
     def compose(self) -> ComposeResult:
         yield Label(
-            f"mimicode  ·  {self.session.id}  ·  shift+enter for newline  ·  ctrl+c to quit",
+            f"mimicode  ·  {self.session.id}  ·  shift+enter for newline  ·  ctrl+c to interrupt  ·  ctrl+d to quit",
             id="header",
         )
         yield RichLog(id="chat", markup=False, highlight=False, wrap=True, auto_scroll=True)
         yield Label(" ● thinking…", id="thinking")
+        yield AutocompleteBox(id="autocomplete")
         yield PromptEditor("", id="editor", language=None, show_line_numbers=False)
         yield Label("", id="footer-bar")
 
+    def on_key(self, event: events.Key) -> None:
+        """Keep focus locked to the editor at all times."""
+        editor = self.query_one(PromptEditor)
+        # block tab/shift+tab from cycling focus to other widgets
+        if event.key in ("tab", "shift+tab"):
+            event.prevent_default()
+            event.stop()
+        # if focus drifted away (e.g. clicked RichLog), snap it back
+        if self.focused is not editor:
+            editor.focus()
+
     def on_mount(self) -> None:
-        log("tui_start", {
-            "session_id": self.session.id,
-            "cwd": self.cwd,
-            "resumed": len(self.messages),
-        })
+        log("tui_start", {"session_id": self.session.id, "cwd": self.cwd, "resumed": len(self.messages)})
         if self.messages:
             self._render_history()
-            self._sys(f"resumed · {sum(1 for m in self.messages if m['role'] == 'user' and isinstance(m.get('content'), str))} prior turns")
+            n = sum(1 for m in self.messages if m["role"] == "user" and isinstance(m.get("content"), str))
+            self._sys(f"resumed · {n} prior turns")
         self._update_footer()
         self.query_one(PromptEditor).focus()
+
+    # -----------------------------------------------------------------------
+    # Actions
+    # -----------------------------------------------------------------------
+
+    def on_prompt_editor_interrupt_requested(self, event: PromptEditor.InterruptRequested) -> None:
+        """ctrl+c inside the editor — signal the agent to stop, never exits."""
+        if self.is_processing:
+            self._cancel_event.set()
+            log("tui_interrupt", {"session_id": self.session.id})
+
+    # -----------------------------------------------------------------------
+    # Streaming event handler
+    # -----------------------------------------------------------------------
+
+    async def _handle_stream_event(self, event_type: str, data: dict) -> None:
+        """Handle real-time streaming events from the agent."""
+        # Don't render anything if user has cancelled
+        if self.is_cancelled:
+            return
+        
+        if event_type == "text_start":
+            # New text block starting
+            idx = data["index"]
+            self._current_text_blocks[idx] = ""
+        
+        elif event_type == "text_delta":
+            # Text chunk received - render immediately
+            idx = data["index"]
+            text_chunk = data["text"]
+            self._current_text_blocks[idx] = self._current_text_blocks.get(idx, "") + text_chunk
+            # For now, we'll just accumulate - full render happens at tool_start/tool_complete
+        
+        elif event_type == "tool_start":
+            # Tool use block starting - track it
+            idx = data["index"]
+            tool_name = data["name"]
+            self._current_tool_blocks[idx] = {
+                "id": data["id"],
+                "name": tool_name,
+                "input": {},
+            }
+            # Render any accumulated text before showing the tool
+            self._render_accumulated_text()
+        
+        elif event_type == "tool_complete":
+            # Tool definition complete - store the full args
+            idx = data["index"]
+            self._current_tool_blocks[idx] = {
+                "id": data["id"],
+                "name": data["name"],
+                "input": data["input"],
+            }
+        
+        elif event_type == "tool_exec_start":
+            # Tool is actually executing now - show it with full args
+            tool_name = data["name"]
+            args = data["args"]
+            self._tool_call(tool_name, args)
+            self._log().scroll_end(animate=False)
+        
+        elif event_type == "tool_exec_result":
+            # Tool execution completed - show result
+            output = data["output"]
+            is_error = data["is_error"]
+            self._tool_result(output, is_error)
+            self._log().scroll_end(animate=False)
+    
+    def _render_accumulated_text(self) -> None:
+        """Render any accumulated text blocks."""
+        if self._current_text_blocks:
+            full_text = "".join(self._current_text_blocks.values())
+            if full_text.strip():
+                self._bot(full_text)
+            self._current_text_blocks.clear()
+
+    # -----------------------------------------------------------------------
+    # Autocomplete
+    # -----------------------------------------------------------------------
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        text = event.text_area.text
+        box  = self.query_one(AutocompleteBox)
+        if text.startswith("/") and not self.is_processing:
+            matches = _completions(text.strip())
+            self._current_completions = matches
+            box.show_completions(matches)
+        else:
+            self._current_completions = []
+            box.hide()
+
+    def on_prompt_editor_tab_pressed(self, event: PromptEditor.TabPressed) -> None:
+        if not self._current_completions:
+            return
+        top_cmd = self._current_completions[0][0]
+        editor  = self.query_one(PromptEditor)
+        editor.load_text(top_cmd)
+        editor.move_cursor(editor.document.end)
+        self._current_completions = []
+        self.query_one(AutocompleteBox).hide()
 
     # -----------------------------------------------------------------------
     # Chat write helpers — all use rich.text.Text, never raw markup strings
@@ -200,15 +386,16 @@ class MimicodeApp(App):
 
     def _update_footer(self) -> None:
         try:
-            u = session_token_usage(self.session.path)
-            total_k = (u["tokens_in"] + u["tokens_out"]) / 1000
-            line = (
+            u      = session_token_usage(self.session.path)
+            total_k = (u["tokens_in"] + u["tokens_out"] + u["cache_read"] + u["cache_write"]) / 1000
+            line   = (
                 f" claude-sonnet"
                 f"  ·  {total_k:.1f}k tok"
                 f"  ·  ${u['cost_usd']:.4f}"
                 f"  ·  {self.session.id}"
             )
-        except Exception:
+        except Exception as e:
+            log("footer_update_error", {"error": str(e), "session_path": str(self.session.path)})
             line = f" {self.session.id}"
         self.query_one("#footer-bar", Label).update(line)
 
@@ -257,6 +444,7 @@ class MimicodeApp(App):
             for line in [
                 "  /help        show this message",
                 "  /clear       clear chat history",
+                "  /exit        exit the application",
                 "  /usage       token usage for this session",
                 "  /usage all   token usage across all sessions",
             ]:
@@ -269,6 +457,13 @@ class MimicodeApp(App):
             self._log().clear()
             save_messages(self.session.path, self.messages)
             self._sys("chat cleared.")
+            self._update_footer()
+            return True
+        
+        if cmd == "/exit":
+            self._sys("exiting...")
+            log("tui_exit", {"session_id": self.session.id, "via": "slash_command"})
+            self.exit()
             return True
 
         if cmd == "/usage":
@@ -312,12 +507,14 @@ class MimicodeApp(App):
 
     async def on_prompt_editor_submitted(self, event: PromptEditor.Submitted) -> None:
         if self.is_processing:
-            self.notify("agent is still working — please wait", severity="warning")
+            self.notify("agent is still working — ctrl+c or esc to interrupt", severity="warning")
             return
 
-        prompt  = event.value
-        editor  = self.query_one(PromptEditor)
+        prompt   = event.value
+        editor   = self.query_one(PromptEditor)
         thinking = self.query_one("#thinking", Label)
+
+        self.query_one(AutocompleteBox).hide()
 
         if prompt.startswith("/"):
             if not self._slash(prompt):
@@ -329,37 +526,46 @@ class MimicodeApp(App):
         self._log().scroll_end(animate=True)
 
         thinking.add_class("active")
-        editor.disabled = True
+        editor.disabled    = True
         self.is_processing = True
+        self._cancel_event.clear()
 
-        # capture index before agent appends new messages
-        turn_start = len(self.messages)
+        turn_start        = len(self.messages)
+        messages_snapshot = list(self.messages)
 
         try:
+            self._current_text_blocks.clear()
+            self._current_tool_blocks.clear()
+
             self.messages = await agent_turn(
                 prompt,
                 messages=self.messages,
                 cwd=self.cwd,
                 session_id=self.session.id,
+                on_stream_event=self._handle_stream_event,
+                cancel_event=self._cancel_event,
             )
             save_messages(self.session.path, self.messages)
+            self._render_accumulated_text()
 
-            # render only what the agent produced this turn
-            thinking.remove_class("active")
-            for msg in self.messages[turn_start + 1:]:  # +1 skips the user msg we already rendered
-                self._render_msg(msg)
+        except AgentInterrupted:
+            self.messages = messages_snapshot
+            self._current_text_blocks.clear()
+            self._current_tool_blocks.clear()
+            self._blank()
+            self._sys("interrupted.")
 
         except Exception as e:
-            thinking.remove_class("active")
             self._blank()
             self._sys(f"error: {e}")
             log("tui_error", {"error": str(e)})
 
         finally:
             thinking.remove_class("active")
+            self._agent_task = None
             self._update_footer()
             self._log().scroll_end(animate=True)
-            editor.disabled = False
+            editor.disabled    = False
             editor.focus()
             self.is_processing = False
 
