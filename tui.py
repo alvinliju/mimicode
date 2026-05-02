@@ -1,409 +1,383 @@
-"""TUI (Text User Interface) for mimicode using Textual."""
-import asyncio
+"""TUI for mimicode — pi-style line-by-line chat, multi-line input, live footer."""
 import os
 import sys
-from datetime import date
-from pathlib import Path
 
+from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Container, Vertical, VerticalScroll
-from textual.widgets import Header, Footer, Input, Static, Label
 from textual.binding import Binding
+from textual.message import Message
+from textual.widgets import Label, RichLog, TextArea
 
+from agent import agent_turn, load_messages, save_messages
 from logger import log, start_session
-from agent import agent_turn, build_system, load_messages, save_messages
 from tools_session import all_sessions_token_usage, session_token_usage
 
+# ---------------------------------------------------------------------------
+# Palette — VS Code Dark+ inspired, mirrors pi-code's look
+# ---------------------------------------------------------------------------
+_BG       = "#1e1e1e"
+_BG2      = "#252526"
+_FG       = "#cccccc"
+_DIM      = "#6a6a6a"
+_USER     = "#569cd6"   # blue
+_BOT      = "#4ec9b0"   # teal
+_TOOL     = "#dcdcaa"   # yellow
+_OK       = "#6a9955"   # green
+_ERR      = "#f44747"   # red
+_ACCENT   = "#007acc"
 
-class MessageBox(Static):
-    """A widget to display a single message."""
 
-    def __init__(self, content: str = "", **kwargs) -> None:
-        super().__init__(content, markup=False, **kwargs)
+# ---------------------------------------------------------------------------
+# PromptEditor — TextArea with Enter=submit, Shift+Enter=newline
+# ---------------------------------------------------------------------------
 
+class PromptEditor(TextArea):
+    """Multi-line prompt input. Enter submits; Shift+Enter inserts a newline."""
 
-class ThinkingIndicator(Static):
-    """Shows when the agent is working."""
-    
-    DEFAULT_CSS = """
-    ThinkingIndicator {
-        background: $boost;
-        color: $text;
-        padding: 1;
-        margin: 0 1;
+    class Submitted(Message):
+        def __init__(self, editor: "PromptEditor", value: str) -> None:
+            self.editor = editor
+            self.value = value
+            super().__init__()
+
+    DEFAULT_CSS = f"""
+    PromptEditor {{
         height: auto;
-        display: none;
-    }
-    
-    ThinkingIndicator.active {
-        display: block;
-    }
-    """
-    
-    def __init__(self):
-        super().__init__("🤖 Agent is thinking...")
-        self.add_class("thinking")
-
-
-class ChatHistory(VerticalScroll):
-    """Container for chat messages."""
-    
-    DEFAULT_CSS = """
-    ChatHistory {
-        height: 1fr;
-        background: $surface;
-        border: solid $primary;
-        padding: 1;
-    }
-    
-    MessageBox {
-        margin: 0 0 1 0;
-        padding: 1;
-        background: $panel;
-        border: solid $accent;
-        height: auto;
-    }
-    
-    MessageBox.user {
-        background: $primary-darken-2;
-        border: solid $primary;
-    }
-    
-    MessageBox.assistant {
-        background: $success-darken-2;
-        border: solid $success;
-    }
-    
-    MessageBox.tool {
-        background: $warning-darken-3;
-        border: solid $warning;
-        color: $text-muted;
-    }
+        min-height: 3;
+        max-height: 10;
+        background: {_BG};
+        color: {_FG};
+        border: none;
+        border-top: solid {_ACCENT};
+        padding: 0 1;
+    }}
+    PromptEditor:focus {{
+        border-top: solid {_USER};
+    }}
+    PromptEditor .text-area--cursor-line {{
+        background: {_BG2};
+    }}
     """
 
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.prevent_default()
+            text = self.text.strip()
+            if text:
+                self.post_message(self.Submitted(self, text))
+                self.load_text("")
+        elif event.key == "shift+enter":
+            event.prevent_default()
+            self.insert("\n")
 
-class PromptInput(Input):
-    """Input field for user prompts."""
-    
-    DEFAULT_CSS = """
-    PromptInput {
-        dock: bottom;
-        border: solid $accent;
-        margin: 1;
-    }
-    """
 
+# ---------------------------------------------------------------------------
+# MimicodeApp
+# ---------------------------------------------------------------------------
 
 class MimicodeApp(App):
-    """A Textual app for Mimicode."""
-    
-    CSS = """
-    Screen {
-        background: $surface;
-    }
-    
-    #title {
-        background: $primary;
-        color: $text;
-        padding: 1;
-        text-align: center;
-        height: auto;
-        margin-bottom: 1;
-    }
+    """Mimicode TUI — pi-style line-by-line layout."""
+
+    CSS = f"""
+    Screen {{
+        background: {_BG};
+    }}
+    #header {{
+        background: {_BG2};
+        color: {_DIM};
+        height: 1;
+        padding: 0 1;
+    }}
+    #chat {{
+        height: 1fr;
+        background: {_BG};
+        padding: 0 1;
+        scrollbar-size: 0 0;
+    }}
+    #thinking {{
+        height: 1;
+        background: {_BG};
+        padding: 0 1;
+        color: {_DIM};
+        display: none;
+    }}
+    #thinking.active {{
+        display: block;
+    }}
+    #footer-bar {{
+        background: {_BG2};
+        color: {_DIM};
+        height: 1;
+        padding: 0 1;
+    }}
     """
-    
+
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("ctrl+d", "quit", "Quit", show=False),
     ]
-    
-    def __init__(self, session_id: str | None = None):
+
+    def __init__(self, session_id: str | None = None) -> None:
         super().__init__()
         self.session = start_session(session_id)
         self.messages = load_messages(self.session.path)
         self.cwd = os.getcwd()
         self.is_processing = False
-        
+
     def compose(self) -> ComposeResult:
-        """Create child widgets for the app."""
-        yield Label(f"🤖 Mimicode TUI - Session: {self.session.id}", id="title")
-        yield ChatHistory()
-        yield ThinkingIndicator()
-        yield PromptInput(placeholder="Type your prompt here and press Enter...")
-        yield Footer()
-    
+        yield Label(
+            f"mimicode  ·  {self.session.id}  ·  shift+enter for newline  ·  ctrl+c to quit",
+            id="header",
+        )
+        yield RichLog(id="chat", markup=False, highlight=False, wrap=True, auto_scroll=True)
+        yield Label(" ● thinking…", id="thinking")
+        yield PromptEditor("", id="editor", language=None, show_line_numbers=False)
+        yield Label("", id="footer-bar")
+
     def on_mount(self) -> None:
-        """Initialize the app after mounting."""
         log("tui_start", {
             "session_id": self.session.id,
             "cwd": self.cwd,
-            "resumed_messages": len(self.messages),
+            "resumed": len(self.messages),
         })
-        
-        # Load existing messages
         if self.messages:
-            self._render_all_messages()
-            self.notify(f"Resumed session with {len(self.messages)} messages")
-        
-        # Focus on the input
-        self.query_one(PromptInput).focus()
-    
-    def _render_all_messages(self) -> None:
-        """Render all messages from history."""
-        chat = self.query_one(ChatHistory)
-        
+            self._render_history()
+            self._sys(f"resumed · {sum(1 for m in self.messages if m['role'] == 'user' and isinstance(m.get('content'), str))} prior turns")
+        self._update_footer()
+        self.query_one(PromptEditor).focus()
+
+    # -----------------------------------------------------------------------
+    # Chat write helpers — all use rich.text.Text, never raw markup strings
+    # -----------------------------------------------------------------------
+
+    def _log(self) -> RichLog:
+        return self.query_one("#chat", RichLog)
+
+    def _blank(self) -> None:
+        self._log().write(Text(""))
+
+    def _user(self, text: str) -> None:
+        self._blank()
+        lines = text.splitlines() or [""]
+        for i, line in enumerate(lines):
+            pfx = "you  " if i == 0 else "     "
+            self._log().write(Text.assemble((pfx, f"bold {_USER}"), (line, _FG)))
+
+    def _bot(self, text: str) -> None:
+        if not text.strip():
+            return
+        self._blank()
+        lines = text.splitlines() or [""]
+        for i, line in enumerate(lines):
+            pfx = " ●   " if i == 0 else "     "
+            self._log().write(Text.assemble((pfx, f"bold {_BOT}"), (line, _FG)))
+
+    def _tool_call(self, name: str, args: dict) -> None:
+        parts = "  ".join(f"{k}={str(v)[:50]}" for k, v in (args or {}).items())
+        if len(parts) > 90:
+            parts = parts[:90] + "…"
+        self._log().write(Text.assemble(
+            (" ⚙   ", f"bold {_TOOL}"),
+            (name + "  ", _TOOL),
+            (parts, _DIM),
+        ))
+
+    def _tool_result(self, output: str, is_error: bool) -> None:
+        icon  = " ✗   " if is_error else " ✓   "
+        color = _ERR if is_error else _OK
+        preview = output.replace("\n", "  ")[:120]
+        if len(output) > 120:
+            preview += f"…  ({len(output):,} chars)"
+        self._log().write(Text.assemble((icon, f"bold {color}"), (preview, _DIM)))
+
+    def _sys(self, text: str) -> None:
+        self._log().write(Text.assemble(("     ", ""), (text, _DIM)))
+
+    # -----------------------------------------------------------------------
+    # Footer
+    # -----------------------------------------------------------------------
+
+    def _update_footer(self) -> None:
+        try:
+            u = session_token_usage(self.session.path)
+            total_k = (u["tokens_in"] + u["tokens_out"]) / 1000
+            line = (
+                f" claude-sonnet"
+                f"  ·  {total_k:.1f}k tok"
+                f"  ·  ${u['cost_usd']:.4f}"
+                f"  ·  {self.session.id}"
+            )
+        except Exception:
+            line = f" {self.session.id}"
+        self.query_one("#footer-bar", Label).update(line)
+
+    # -----------------------------------------------------------------------
+    # History render
+    # -----------------------------------------------------------------------
+
+    def _render_history(self) -> None:
         for msg in self.messages:
-            if msg["role"] == "user":
-                # Check if it's a tool result or a user prompt
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    # Tool results
-                    for item in content:
-                        if item.get("type") == "tool_result":
-                            tool_msg = f"🔧 Tool Result (ID: {item['tool_use_id'][:8]}...)\n"
-                            tool_msg += f"{'❌ Error' if item.get('is_error') else '✅ Success'}\n"
-                            output = item.get("content", "")
-                            # Truncate long outputs
-                            if len(output) > 500:
-                                output = output[:500] + f"\n... ({len(output)} chars total)"
-                            tool_msg += output
-                            box = MessageBox(tool_msg)
-                            box.add_class("tool")
-                            chat.mount(box)
-                else:
-                    # Regular user message
-                    box = MessageBox(f"👤 You: {content}")
-                    box.add_class("user")
-                    chat.mount(box)
-            
-            elif msg["role"] == "assistant":
-                # Extract text and tool uses
-                content = msg.get("content", [])
-                if isinstance(content, list):
-                    text_parts = []
-                    tool_uses = []
-                    
-                    for block in content:
-                        if block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                        elif block.get("type") == "tool_use":
-                            tool_uses.append(block)
-                    
-                    # Show text response
-                    if text_parts:
-                        text = "\n".join(text_parts)
-                        box = MessageBox(f"🤖 Assistant:\n{text}")
-                        box.add_class("assistant")
-                        chat.mount(box)
-                    
-                    # Show tool uses
-                    for tu in tool_uses:
-                        tool_msg = f"🔧 Using tool: {tu['name']}\n"
-                        tool_msg += f"Args: {tu.get('input', {})}"
-                        box = MessageBox(tool_msg)
-                        box.add_class("tool")
-                        chat.mount(box)
-        
-        # Scroll to bottom
-        chat.scroll_end(animate=False)
-    
-    def _handle_slash_command(self, prompt: str) -> bool:
-        """Handle /commands. Returns True if consumed, False if it should go to the agent."""
-        cmd = prompt.lower().split()[0]
-        chat = self.query_one(ChatHistory)
+            self._render_msg(msg)
+        self._log().scroll_end(animate=False)
+
+    def _render_msg(self, msg: dict) -> None:
+        role    = msg.get("role")
+        content = msg.get("content", "")
+
+        if role == "user":
+            if isinstance(content, str):
+                self._user(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if item.get("type") == "tool_result":
+                        self._tool_result(item.get("content", ""), bool(item.get("is_error")))
+
+        elif role == "assistant" and isinstance(content, list):
+            text_parts: list[str] = []
+            for block in content:
+                t = block.get("type")
+                if t == "text":
+                    text_parts.append(block.get("text", ""))
+                elif t == "tool_use":
+                    self._tool_call(block["name"], block.get("input") or {})
+            if text_parts:
+                self._bot("\n".join(text_parts))
+
+    # -----------------------------------------------------------------------
+    # Slash commands
+    # -----------------------------------------------------------------------
+
+    def _slash(self, prompt: str) -> bool:
+        cmd  = prompt.lower().split()[0]
+        args = prompt.split()
 
         if cmd == "/help":
-            text = (
-                "Slash commands:\n"
-                "  /help        show this message\n"
-                "  /clear       clear chat history and start a fresh conversation\n"
-                "  /usage       token usage and estimated cost for this session\n"
-                "  /usage all   token usage and cost across all sessions"
-            )
-            box = MessageBox(text)
-            box.add_class("tool")
-            chat.mount(box)
-            chat.scroll_end(animate=True)
+            self._blank()
+            for line in [
+                "  /help        show this message",
+                "  /clear       clear chat history",
+                "  /usage       token usage for this session",
+                "  /usage all   token usage across all sessions",
+            ]:
+                self._sys(line)
+            self._log().scroll_end(animate=True)
             return True
 
         if cmd == "/clear":
             self.messages = []
-            chat.remove_children()
+            self._log().clear()
             save_messages(self.session.path, self.messages)
-            box = MessageBox("Chat cleared. Starting a fresh conversation.")
-            box.add_class("tool")
-            chat.mount(box)
-            chat.scroll_end(animate=True)
+            self._sys("chat cleared.")
             return True
 
         if cmd == "/usage":
-            args = prompt.split()
+            self._blank()
             if len(args) > 1 and args[1].lower() == "all":
                 data = all_sessions_token_usage(self.session.path.parent)
-                lines = ["Token usage — all sessions\n"]
+                self._sys("token usage — all sessions")
+                self._blank()
                 for row in data["sessions"]:
-                    lines.append(
-                        f"  {row['session']:<20} "
-                        f"in={row['tokens_in']:>8,}  "
-                        f"out={row['tokens_out']:>8,}  "
-                        f"${row['cost_usd']:.4f}"
+                    self._sys(
+                        f"  {row['session']:<22}"
+                        f"  in {row['tokens_in']:>8,}"
+                        f"  out {row['tokens_out']:>8,}"
+                        f"  ${row['cost_usd']:.4f}"
                     )
                 t = data["totals"]
-                lines.append(
-                    f"\n  {'TOTAL':<20} "
-                    f"in={t['tokens_in']:>8,}  "
-                    f"out={t['tokens_out']:>8,}  "
-                    f"${t['cost_usd']:.4f}"
+                self._blank()
+                self._sys(
+                    f"  {'total':<22}"
+                    f"  in {t['tokens_in']:>8,}"
+                    f"  out {t['tokens_out']:>8,}"
+                    f"  ${t['cost_usd']:.4f}"
                 )
             else:
                 u = session_token_usage(self.session.path)
-                lines = [
-                    f"Token usage — session: {self.session.id}\n",
-                    f"  Input tokens:       {u['tokens_in']:,}",
-                    f"  Output tokens:      {u['tokens_out']:,}",
-                    f"  Cache read tokens:  {u['cache_read']:,}",
-                    f"  Cache write tokens: {u['cache_write']:,}",
-                    f"  Estimated cost:     ${u['cost_usd']:.4f}",
-                ]
-            box = MessageBox("\n".join(lines))
-            box.add_class("tool")
-            chat.mount(box)
-            chat.scroll_end(animate=True)
+                self._sys(f"token usage — {self.session.id}")
+                self._blank()
+                self._sys(f"  input         {u['tokens_in']:,}")
+                self._sys(f"  output        {u['tokens_out']:,}")
+                self._sys(f"  cache read    {u['cache_read']:,}")
+                self._sys(f"  cache write   {u['cache_write']:,}")
+                self._sys(f"  est. cost     ${u['cost_usd']:.4f}")
+            self._log().scroll_end(animate=True)
             return True
 
         return False
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle user input submission."""
+    # -----------------------------------------------------------------------
+    # Input
+    # -----------------------------------------------------------------------
+
+    async def on_prompt_editor_submitted(self, event: PromptEditor.Submitted) -> None:
         if self.is_processing:
-            self.notify("Agent is still working, please wait...", severity="warning")
+            self.notify("agent is still working — please wait", severity="warning")
             return
 
-        prompt = event.value.strip()
-        if not prompt:
-            return
+        prompt  = event.value
+        editor  = self.query_one(PromptEditor)
+        thinking = self.query_one("#thinking", Label)
 
-        # Clear input
-        input_widget = self.query_one(PromptInput)
-        input_widget.value = ""
-
-        # Handle slash commands before sending to agent
         if prompt.startswith("/"):
-            if not self._handle_slash_command(prompt):
-                chat = self.query_one(ChatHistory)
-                box = MessageBox(f"Unknown command: {prompt}  (try /help)")
-                box.add_class("tool")
-                chat.mount(box)
-                chat.scroll_end(animate=True)
+            if not self._slash(prompt):
+                self._sys(f"unknown command: {prompt}  (try /help)")
+                self._log().scroll_end(animate=True)
             return
 
-        # Add user message to chat
-        chat = self.query_one(ChatHistory)
-        user_box = MessageBox(f"You: {prompt}")
-        user_box.add_class("user")
-        chat.mount(user_box)
-        chat.scroll_end(animate=True)
-        
-        # Show thinking indicator
-        thinking = self.query_one(ThinkingIndicator)
+        self._user(prompt)
+        self._log().scroll_end(animate=True)
+
         thinking.add_class("active")
-        
-        # Disable input while processing
-        input_widget.disabled = True
+        editor.disabled = True
         self.is_processing = True
-        
+
+        # capture index before agent appends new messages
+        turn_start = len(self.messages)
+
         try:
-            # Run agent turn
-            self.messages = await agent_turn(prompt, messages=self.messages, cwd=self.cwd, session_id=self.session.id)
-            
-            # Save messages
+            self.messages = await agent_turn(
+                prompt,
+                messages=self.messages,
+                cwd=self.cwd,
+                session_id=self.session.id,
+            )
             save_messages(self.session.path, self.messages)
-            
-            # Display the assistant's response
-            last_msg = self.messages[-1] if self.messages else None
-            
-            # Check if last message is tool results (user role)
-            if last_msg and last_msg["role"] == "user":
-                # Show tool results
-                for item in last_msg.get("content", []):
-                    if item.get("type") == "tool_result":
-                        tool_msg = f"🔧 Tool Result (ID: {item['tool_use_id'][:8]}...)\n"
-                        tool_msg += f"{'❌ Error' if item.get('is_error') else '✅ Success'}\n"
-                        output = item.get("content", "")
-                        if len(output) > 500:
-                            output = output[:500] + f"\n... ({len(output)} chars total)"
-                        tool_msg += output
-                        box = MessageBox(tool_msg)
-                        box.add_class("tool")
-                        chat.mount(box)
-                
-                # Get the assistant message before tool results
-                if len(self.messages) >= 2:
-                    last_msg = self.messages[-2]
-            
-            # Display assistant message
-            if last_msg and last_msg["role"] == "assistant":
-                content = last_msg.get("content", [])
-                if isinstance(content, list):
-                    text_parts = []
-                    tool_uses = []
-                    
-                    for block in content:
-                        if block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                        elif block.get("type") == "tool_use":
-                            tool_uses.append(block)
-                    
-                    # Show tool uses
-                    for tu in tool_uses:
-                        tool_msg = f"🔧 Using tool: {tu['name']}\n"
-                        tool_msg += f"Args: {tu.get('input', {})}"
-                        box = MessageBox(tool_msg)
-                        box.add_class("tool")
-                        chat.mount(box)
-                    
-                    # Show text response
-                    if text_parts:
-                        text = "\n".join(text_parts)
-                        box = MessageBox(f"🤖 Assistant:\n{text}")
-                        box.add_class("assistant")
-                        chat.mount(box)
-            
-            chat.scroll_end(animate=True)
-            
-        except Exception as e:
-            self.notify(f"Error: {str(e)}", severity="error")
-            log("tui_error", {"error": str(e)})
-            
-            # Show error in chat
-            error_box = MessageBox(f"❌ Error: {str(e)}")
-            error_box.add_class("assistant")
-            chat.mount(error_box)
-            chat.scroll_end(animate=True)
-        
-        finally:
-            # Hide thinking indicator
+
+            # render only what the agent produced this turn
             thinking.remove_class("active")
-            
-            # Re-enable input
-            input_widget.disabled = False
-            input_widget.focus()
+            for msg in self.messages[turn_start + 1:]:  # +1 skips the user msg we already rendered
+                self._render_msg(msg)
+
+        except Exception as e:
+            thinking.remove_class("active")
+            self._blank()
+            self._sys(f"error: {e}")
+            log("tui_error", {"error": str(e)})
+
+        finally:
+            thinking.remove_class("active")
+            self._update_footer()
+            self._log().scroll_end(animate=True)
+            editor.disabled = False
+            editor.focus()
             self.is_processing = False
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main(session_id: str | None = None) -> None:
-    """Run the TUI app."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("error: ANTHROPIC_API_KEY not set", file=sys.stderr)
         sys.exit(1)
-    
-    app = MimicodeApp(session_id=session_id)
-    app.run()
+    MimicodeApp(session_id=session_id).run()
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Mimicode TUI")
-    parser.add_argument("-s", "--session", help="Session ID (new or resume)")
-    args = parser.parse_args()
+    p = argparse.ArgumentParser(description="Mimicode TUI")
+    p.add_argument("-s", "--session", help="Session ID")
+    args = p.parse_args()
     main(session_id=args.session)
