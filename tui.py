@@ -16,7 +16,9 @@ from agent import agent_turn, build_system, load_messages, save_messages
 
 class MessageBox(Static):
     """A widget to display a single message."""
-    pass
+
+    def __init__(self, content: str = "", **kwargs) -> None:
+        super().__init__(content, markup=False, **kwargs)
 
 
 class ThinkingIndicator(Static):
@@ -235,7 +237,7 @@ class MimicodeApp(App):
         
         try:
             # Run agent turn
-            self.messages = await agent_turn(prompt, messages=self.messages, cwd=self.cwd)
+            self.messages = await agent_turn(prompt, messages=self.messages, cwd=self.cwd, session_id=self.session.id)
             
             # Save messages
             save_messages(self.session.path, self.messages)

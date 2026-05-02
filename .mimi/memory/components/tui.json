@@ -1,0 +1,30 @@
+{
+  "id": "tui-component",
+  "type": "component",
+  "created_at": "2026-05-02",
+  "updated_at": "2026-05-02",
+  "related_files": [
+    "tui.py",
+    "tui_launcher.py"
+  ],
+  "tags": [
+    "tui",
+    "textual",
+    "ui",
+    "chat"
+  ],
+  "summary": "Textual TUI app for mimicode: chat history + prompt input, resumable sessions",
+  "detail": "tui.py implements MimicodeApp (Textual App) with ChatHistory (VerticalScroll), MessageBox (Static, markup=False), ThinkingIndicator, and PromptInput. Calls agent_turn() asynchronously and persists messages via save_messages(). Launched via `python agent.py --tui [-s session_id]` or directly via tui.py --session. markup=False on MessageBox is critical \u2014 tool output contains brackets that crash Rich renderer.",
+  "decisions": [
+    "Used Textual over curses/rich direct \u2014 widget model handles layout and async cleanly",
+    "markup=False on MessageBox \u2014 Rich brackets in tool output caused MarkupError in _refresh_layout",
+    "ThinkingIndicator uses display:none/block CSS toggle rather than mount/unmount"
+  ],
+  "changes": [
+    {
+      "file": "tui.py",
+      "what": "markup=False on MessageBox.__init__",
+      "why": "brackets in tool output crash Rich renderer"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "id": "tui-markdown-files-eliminated",
+  "type": "decision",
+  "created_at": "2026-05-02",
+  "updated_at": "2026-05-02",
+  "tags": [
+    "memory",
+    "docs",
+    "tui"
+  ],
+  "summary": "TUI session generated many .md files; replaced with .mimi/memory JSON system",
+  "detail": "The first TUI build session (tuisesh) had the agent generate 12+ markdown documentation files (TUI_BANNER.txt, TUI_COMPLETE.md, TUI_IMPLEMENTATION.md, etc.) as a side effect of building. These are noise \u2014 the memory system replaces them with structured, indexable JSON that the agent can navigate without reading everything."
+}

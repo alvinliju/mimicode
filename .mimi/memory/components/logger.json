@@ -1,0 +1,18 @@
+{
+  "id": "logger-component",
+  "type": "component",
+  "created_at": "2026-05-02",
+  "updated_at": "2026-05-02",
+  "related_files": [
+    "logger.py"
+  ],
+  "tags": [
+    "logger",
+    "session",
+    "jsonl"
+  ],
+  "summary": "Lightweight JSONL event logger: session-scoped, writes to sessions/<id>.jsonl",
+  "detail": "logger.py provides Session dataclass + module-level log()/start_session() helpers. Each event: {t, session, kind, data}. t is seconds since session start. Kinds used: session_start, user_message, model_request, model_response, tool_call, tool_result, turn_end, repl_end.",
+  "decisions": [],
+  "changes": []
+}

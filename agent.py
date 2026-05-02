@@ -21,6 +21,7 @@ from datetime import date
 from pathlib import Path
 
 from logger import log, start_session
+from mimi_memory import handle_memory_write, load_session_context
 from providers import call_claude
 from tools import bash, edit, read, write
 
@@ -107,13 +108,45 @@ TOOLS = [
             "required": ["path", "old_text", "new_text"],
         },
     },
+    {
+        "name": "memory_write",
+        "description": (
+            "Persist what you just did to .mimi/memory so future sessions can load it efficiently. "
+            "Call this after completing a task or making a significant change. "
+            "Use component names like 'tui', 'agent', 'logger', 'tools', etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string", "description": "Component name (e.g. 'tui', 'agent')"},
+                "summary": {"type": "string", "description": "One-line summary of the current state of this component"},
+                "detail": {"type": "string", "description": "Full explanation of what was done and why"},
+                "related_files": {"type": "array", "items": {"type": "string"}, "description": "File paths touched"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "open_issues": {"type": "array", "items": {"type": "string"}, "description": "Unresolved issues to carry forward"},
+                "change_entry": {
+                    "type": "object",
+                    "description": "Record of the specific change made this turn",
+                    "properties": {
+                        "file": {"type": "string"},
+                        "what": {"type": "string"},
+                        "why": {"type": "string"},
+                    },
+                },
+            },
+            "required": ["component", "summary"],
+        },
+    },
 ]
 
 _TOOL_FNS = {"bash": bash, "read": read, "write": write, "edit": edit}
 
 
-def build_system(cwd: str) -> str:
-    return f"{SYSTEM_PROMPT}\n\nCurrent date: {date.today().isoformat()}\nCurrent working directory: {cwd}"
+def build_system(cwd: str, memory_context: str = "") -> str:
+    base = f"{SYSTEM_PROMPT}\n\nCurrent date: {date.today().isoformat()}\nCurrent working directory: {cwd}"
+    if memory_context:
+        return f"{base}\n\n{memory_context}"
+    return base
 
 
 def messages_path(session_path: Path) -> Path:
@@ -140,16 +173,20 @@ def save_messages(session_path: Path, messages: list[dict]) -> None:
     mp.write_text(json.dumps(messages, indent=2))
 
 
-async def _dispatch(name: str, args: dict, cwd: str):
-    fn = _TOOL_FNS.get(name)
-    if fn is None:
-        from tools import ToolResult
-        return ToolResult(output=f"[error] unknown tool: {name}", is_error=True)
+async def _dispatch(name: str, args: dict, cwd: str, session_id: str | None = None):
+    from tools import ToolResult
     log("tool_call", {"name": name, "args_keys": list(args.keys())})
-    result = await fn(cwd=cwd, **args)
-    # invariant: anthropic rejects tool_result with is_error=true and empty content.
-    if result.is_error and not result.output:
-        result.output = "[error] (no output)"
+    if name == "memory_write":
+        output = handle_memory_write(session_id or "", args)
+        result = ToolResult(output=output, is_error=False)
+    else:
+        fn = _TOOL_FNS.get(name)
+        if fn is None:
+            result = ToolResult(output=f"[error] unknown tool: {name}", is_error=True)
+        else:
+            result = await fn(cwd=cwd, **args)
+        if result.is_error and not result.output:
+            result.output = "[error] (no output)"
     log("tool_result", {"name": name, "is_error": result.is_error, "bytes": len(result.output)})
     return result
 
@@ -159,6 +196,7 @@ async def agent_turn(
     messages: list[dict] | None = None,
     cwd: str = ".",
     max_steps: int = 25,
+    session_id: str | None = None,
 ) -> list[dict]:
     """run one user turn to completion. appends user_msg to `messages` (or
     starts fresh if None) and returns the extended list. pass the same list
@@ -167,7 +205,8 @@ async def agent_turn(
     if messages is None:
         messages = []
     messages.append({"role": "user", "content": user_msg})
-    system = build_system(cwd)
+    memory_context = load_session_context(session_id) if session_id else ""
+    system = build_system(cwd, memory_context)
     for step in range(max_steps):
         assistant = await call_claude(messages, system=system, tools=TOOLS)
         messages.append(assistant)
@@ -177,7 +216,7 @@ async def agent_turn(
             return messages
         results = []
         for tu in tool_uses:
-            result = await _dispatch(tu["name"], tu.get("input", {}) or {}, cwd)
+            result = await _dispatch(tu["name"], tu.get("input", {}) or {}, cwd, session_id)
             results.append(
                 {
                     "type": "tool_result",
@@ -208,17 +247,17 @@ def _print_final(messages: list[dict]) -> None:
         print(text)
 
 
-async def _run_one_shot(prompt: str, session_path: Path, cwd: str) -> None:
+async def _run_one_shot(prompt: str, session_path: Path, cwd: str, session_id: str) -> None:
     messages = load_messages(session_path)
     resumed = bool(messages)
     if resumed:
         print(f"[mimicode] resumed {len(messages)} prior messages", file=sys.stderr)
-    messages = await agent_turn(prompt, messages=messages, cwd=cwd)
+    messages = await agent_turn(prompt, messages=messages, cwd=cwd, session_id=session_id)
     save_messages(session_path, messages)
     _print_final(messages)
 
 
-async def _run_repl(session_path: Path, cwd: str) -> None:
+async def _run_repl(session_path: Path, cwd: str, session_id: str) -> None:
     messages = load_messages(session_path)
     if messages:
         print(f"[mimicode] resumed {len(messages)} prior messages", file=sys.stderr)
@@ -231,7 +270,7 @@ async def _run_repl(session_path: Path, cwd: str) -> None:
             break
         if not prompt or prompt in (":q", ":quit", ":exit"):
             break
-        messages = await agent_turn(prompt, messages=messages, cwd=cwd)
+        messages = await agent_turn(prompt, messages=messages, cwd=cwd, session_id=session_id)
         save_messages(session_path, messages)
         _print_final(messages)
         print()  # blank line between turns
@@ -270,9 +309,9 @@ def main(argv: list[str] | None = None) -> None:
 
     cwd = os.getcwd()
     if prompt:
-        asyncio.run(_run_one_shot(prompt, sess.path, cwd))
+        asyncio.run(_run_one_shot(prompt, sess.path, cwd, sess.id))
     else:
-        asyncio.run(_run_repl(sess.path, cwd))
+        asyncio.run(_run_repl(sess.path, cwd, sess.id))
 
 
 if __name__ == "__main__":
