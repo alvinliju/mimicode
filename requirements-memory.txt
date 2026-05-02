@@ -1,2 +1,0 @@
-fastembed>=0.4
-sqlite-vec>=0.1.6
