@@ -81,5 +81,3 @@
                          Made with ❤️ for Mimicode
                             Version 1.0 - 2026
 ═══════════════════════════════════════════════════════════════════════
- cd D:/mimicode && rm QUICKSTART_TUI.md README_TUI.md RUN_TUI.md TUI_COMPLETE.md
-   TUI_IMPLEMENTATION.md TUI_INDEX.md TUI_README.md TUI_SUMMARY.md TUI_VISUAL_GUIDE.md test.md

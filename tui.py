@@ -12,6 +12,7 @@ from textual.binding import Binding
 
 from logger import log, start_session
 from agent import agent_turn, build_system, load_messages, save_messages
+from tools_session import session_token_usage
 
 
 class MessageBox(Static):
@@ -206,23 +207,79 @@ class MimicodeApp(App):
         # Scroll to bottom
         chat.scroll_end(animate=False)
     
+    def _handle_slash_command(self, prompt: str) -> bool:
+        """Handle /commands. Returns True if consumed, False if it should go to the agent."""
+        cmd = prompt.lower().split()[0]
+        chat = self.query_one(ChatHistory)
+
+        if cmd == "/help":
+            text = (
+                "Slash commands:\n"
+                "  /help    show this message\n"
+                "  /clear   clear chat history and start a fresh conversation\n"
+                "  /usage   show token usage and estimated cost for this session"
+            )
+            box = MessageBox(text)
+            box.add_class("tool")
+            chat.mount(box)
+            chat.scroll_end(animate=True)
+            return True
+
+        if cmd == "/clear":
+            self.messages = []
+            chat.remove_children()
+            save_messages(self.session.path, self.messages)
+            box = MessageBox("Chat cleared. Starting a fresh conversation.")
+            box.add_class("tool")
+            chat.mount(box)
+            chat.scroll_end(animate=True)
+            return True
+
+        if cmd == "/usage":
+            u = session_token_usage(self.session.path)
+            text = (
+                f"Token usage — session: {self.session.id}\n"
+                f"  Input tokens:       {u['tokens_in']:,}\n"
+                f"  Output tokens:      {u['tokens_out']:,}\n"
+                f"  Cache read tokens:  {u['cache_read']:,}\n"
+                f"  Cache write tokens: {u['cache_write']:,}\n"
+                f"  Estimated cost:     ${u['cost_usd']:.4f}"
+            )
+            box = MessageBox(text)
+            box.add_class("tool")
+            chat.mount(box)
+            chat.scroll_end(animate=True)
+            return True
+
+        return False
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle user input submission."""
         if self.is_processing:
             self.notify("Agent is still working, please wait...", severity="warning")
             return
-        
+
         prompt = event.value.strip()
         if not prompt:
             return
-        
+
         # Clear input
         input_widget = self.query_one(PromptInput)
         input_widget.value = ""
-        
+
+        # Handle slash commands before sending to agent
+        if prompt.startswith("/"):
+            if not self._handle_slash_command(prompt):
+                chat = self.query_one(ChatHistory)
+                box = MessageBox(f"Unknown command: {prompt}  (try /help)")
+                box.add_class("tool")
+                chat.mount(box)
+                chat.scroll_end(animate=True)
+            return
+
         # Add user message to chat
         chat = self.query_one(ChatHistory)
-        user_box = MessageBox(f"👤 You: {prompt}")
+        user_box = MessageBox(f"You: {prompt}")
         user_box.add_class("user")
         chat.mount(user_box)
         chat.scroll_end(animate=True)
