@@ -62,9 +62,6 @@ class PromptEditor(TextArea):
             self.editor = editor
             super().__init__()
 
-    class InterruptRequested(Message):
-        pass
-
     DEFAULT_CSS = f"""
     PromptEditor {{
         height: auto;
@@ -85,11 +82,7 @@ class PromptEditor(TextArea):
     """
 
     def on_key(self, event: events.Key) -> None:
-        if event.key == "ctrl+c":
-            event.prevent_default()
-            event.stop()
-            self.post_message(self.InterruptRequested())
-        elif event.key == "enter":
+        if event.key == "enter":
             event.prevent_default()
             text = self.text.strip()
             if text:
@@ -188,6 +181,8 @@ class MimicodeApp(App):
 
     BINDINGS = [
         Binding("ctrl+d", "quit", "Quit", show=False, priority=True),
+        Binding("ctrl+c", "interrupt", "Interrupt", show=False, priority=True),
+        Binding("escape", "interrupt_restore", "Interrupt+restore", show=False, priority=True),
     ]
 
     def __init__(self, session_id: str | None = None) -> None:
@@ -196,15 +191,17 @@ class MimicodeApp(App):
         self.messages     = load_messages(self.session.path)
         self.cwd          = os.getcwd()
         self.is_processing = False
+        self._last_prompt: str = ""
         self._cancel_event: asyncio.Event = asyncio.Event()
         self._agent_task: asyncio.Task | None = None
         self._current_completions: list[tuple[str, str]] = []
         self._current_text_blocks: dict[int, str] = {}
         self._current_tool_blocks: dict[int, dict] = {}
+        self._interrupted: bool = False
 
     def compose(self) -> ComposeResult:
         yield Label(
-            f"mimicode  ·  {self.session.id}  ·  shift+enter for newline  ·  ctrl+c to interrupt  ·  ctrl+d to quit",
+            f"mimicode  ·  {self.session.id}  ·  shift+enter for newline  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+d quit",
             id="header",
         )
         yield RichLog(id="chat", markup=False, highlight=False, wrap=True, auto_scroll=True)
@@ -237,11 +234,39 @@ class MimicodeApp(App):
     # Actions
     # -----------------------------------------------------------------------
 
-    def on_prompt_editor_interrupt_requested(self, event: PromptEditor.InterruptRequested) -> None:
-        """ctrl+c inside the editor — signal the agent to stop, never exits."""
-        if self.is_processing:
-            self._cancel_event.set()
-            log("tui_interrupt", {"session_id": self.session.id})
+    def _do_interrupt(self, restore: bool = False) -> None:
+        """Immediately cancel the agent task and restore UI. No waiting."""
+        if not self.is_processing:
+            if not restore:
+                pass
+            else:
+                self.query_one(AutocompleteBox).hide()
+            return
+        self._cancel_event.set()
+        if self._agent_task and not self._agent_task.done():
+            self._agent_task.cancel()
+        self._interrupted = True
+        editor  = self.query_one(PromptEditor)
+        thinking = self.query_one("#thinking", Label)
+        thinking.remove_class("active")
+        self._current_text_blocks.clear()
+        self._current_tool_blocks.clear()
+        self._blank()
+        self._sys("interrupted.")
+        self._update_footer()
+        self._log().scroll_end(animate=True)
+        editor.disabled = False
+        editor.focus()
+        self.is_processing = False
+        if restore and self._last_prompt:
+            editor.load_text(self._last_prompt)
+            editor.move_cursor(editor.document.end)
+
+    def action_interrupt(self) -> None:
+        self._do_interrupt(restore=False)
+
+    def action_interrupt_restore(self) -> None:
+        self._do_interrupt(restore=True)
 
     # -----------------------------------------------------------------------
     # Streaming event handler
@@ -250,7 +275,7 @@ class MimicodeApp(App):
     async def _handle_stream_event(self, event_type: str, data: dict) -> None:
         """Handle real-time streaming events from the agent."""
         # Don't render anything if user has cancelled
-        if self.is_cancelled:
+        if self._cancel_event.is_set():
             return
         
         if event_type == "text_start":
@@ -510,9 +535,8 @@ class MimicodeApp(App):
             self.notify("agent is still working — ctrl+c or esc to interrupt", severity="warning")
             return
 
-        prompt   = event.value
-        editor   = self.query_one(PromptEditor)
-        thinking = self.query_one("#thinking", Label)
+        prompt = event.value
+        editor = self.query_one(PromptEditor)
 
         self.query_one(AutocompleteBox).hide()
 
@@ -522,21 +546,27 @@ class MimicodeApp(App):
                 self._log().scroll_end(animate=True)
             return
 
+        self._last_prompt = prompt
         self._user(prompt)
         self._log().scroll_end(animate=True)
 
-        thinking.add_class("active")
+        self.query_one("#thinking", Label).add_class("active")
         editor.disabled    = True
         self.is_processing = True
+        self._interrupted  = False
         self._cancel_event.clear()
+        self._current_text_blocks.clear()
+        self._current_tool_blocks.clear()
 
-        turn_start        = len(self.messages)
-        messages_snapshot = list(self.messages)
+        messages_snapshot  = list(self.messages)
+        self._agent_task   = asyncio.create_task(
+            self._run_agent(prompt, messages_snapshot)
+        )
 
+    async def _run_agent(self, prompt: str, messages_snapshot: list) -> None:
+        editor   = self.query_one(PromptEditor)
+        thinking = self.query_one("#thinking", Label)
         try:
-            self._current_text_blocks.clear()
-            self._current_tool_blocks.clear()
-
             self.messages = await agent_turn(
                 prompt,
                 messages=self.messages,
@@ -545,29 +575,33 @@ class MimicodeApp(App):
                 on_stream_event=self._handle_stream_event,
                 cancel_event=self._cancel_event,
             )
-            save_messages(self.session.path, self.messages)
-            self._render_accumulated_text()
+            if not self._interrupted:
+                save_messages(self.session.path, self.messages)
+                self._render_accumulated_text()
 
-        except AgentInterrupted:
+        except (AgentInterrupted, asyncio.CancelledError):
             self.messages = messages_snapshot
             self._current_text_blocks.clear()
             self._current_tool_blocks.clear()
-            self._blank()
-            self._sys("interrupted.")
+            if not self._interrupted:
+                self._blank()
+                self._sys("interrupted.")
 
         except Exception as e:
-            self._blank()
-            self._sys(f"error: {e}")
-            log("tui_error", {"error": str(e)})
+            if not self._interrupted:
+                self._blank()
+                self._sys(f"error: {e}")
+                log("tui_error", {"error": str(e)})
 
         finally:
-            thinking.remove_class("active")
             self._agent_task = None
-            self._update_footer()
-            self._log().scroll_end(animate=True)
-            editor.disabled    = False
-            editor.focus()
-            self.is_processing = False
+            if not self._interrupted:
+                thinking.remove_class("active")
+                self._update_footer()
+                self._log().scroll_end(animate=True)
+                editor.disabled    = False
+                editor.focus()
+                self.is_processing = False
 
 
 # ---------------------------------------------------------------------------
