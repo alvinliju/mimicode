@@ -247,37 +247,56 @@ def init_memory(session_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _extract_touched_files(messages: list[dict]) -> list[str]:
-    """Scan the last assistant turn's tool_uses for file paths."""
-    files: list[str] = []
-    # walk backwards to find the last assistant message with tool_uses
-    for msg in reversed(messages):
+    """Scan ALL tool_use blocks across the conversation for explicit file paths."""
+    seen: dict[str, None] = {}  # ordered set
+    for msg in messages:
         if msg.get("role") != "assistant":
             continue
         for block in msg.get("content", []):
             if block.get("type") == "tool_use":
                 inp = block.get("input", {}) or {}
                 path = inp.get("path") or inp.get("file")
-                if path and path not in files:
-                    files.append(path)
-        if files:
-            break
-    return files
+                if path:
+                    seen[path] = None
+    return list(seen.keys())
+
+
+def _extract_last_assistant_text(messages: list[dict]) -> str:
+    """Return the last assistant plain-text response."""
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        parts = [b.get("text", "") for b in msg.get("content", []) if b.get("type") == "text"]
+        text = " ".join(parts).strip()
+        if text:
+            return text[:200]
+    return ""
+
+
+def _count_turns(messages: list[dict]) -> int:
+    return sum(1 for m in messages if m.get("role") == "user"
+               and isinstance(m.get("content"), str))
 
 
 def auto_update_session(session_id: str, messages: list[dict]) -> None:
-    """Passively update session meta after a turn — touched files and last_active."""
-    touched = _extract_touched_files(messages)
-    if not touched and not session_id:
+    """Passively update session meta after a turn — always writes last_active."""
+    if not session_id:
         return
 
     meta = load_session_meta(session_id) or {}
-    existing = meta.get("focus_files", [])
-    # merge without duplicates, most-recent first
-    merged = list(dict.fromkeys(touched + existing))[:20]
+
+    # merge touched files (most-recent first, capped at 20)
+    touched = _extract_touched_files(messages)
+    existing_files = meta.get("focus_files", [])
+    merged_files = list(dict.fromkeys(touched + existing_files))[:20]
+
+    # auto-populate summary from last assistant text when still blank
+    summary = meta.get("summary") or _extract_last_assistant_text(messages)
 
     update_session_meta(
         session_id=session_id,
-        focus_files=merged if merged else None,
+        focus_files=merged_files,
+        summary=summary or meta.get("summary"),
     )
 
 
