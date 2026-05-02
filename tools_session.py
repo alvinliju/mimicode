@@ -55,3 +55,24 @@ def session_token_usage(session_path: Path) -> dict:
         "cache_write": cache_write,
         "cost_usd":    round(cost, 6),
     }
+
+
+def all_sessions_token_usage(sessions_dir: Path) -> dict:
+    """sum token usage across every .jsonl in sessions_dir, with per-session breakdown."""
+    sessions_dir = Path(sessions_dir)
+    rows = []
+    totals = {"tokens_in": 0, "tokens_out": 0, "cache_read": 0, "cache_write": 0, "cost_usd": 0.0}
+
+    for path in sorted(sessions_dir.glob("*.jsonl")):
+        u = session_token_usage(path)
+        if u["tokens_in"] == 0 and u["tokens_out"] == 0:
+            continue
+        rows.append({"session": path.stem, **u})
+        totals["tokens_in"]   += u["tokens_in"]
+        totals["tokens_out"]  += u["tokens_out"]
+        totals["cache_read"]  += u["cache_read"]
+        totals["cache_write"] += u["cache_write"]
+        totals["cost_usd"]    += u["cost_usd"]
+
+    totals["cost_usd"] = round(totals["cost_usd"], 6)
+    return {"sessions": rows, "totals": totals}

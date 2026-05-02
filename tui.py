@@ -12,7 +12,7 @@ from textual.binding import Binding
 
 from logger import log, start_session
 from agent import agent_turn, build_system, load_messages, save_messages
-from tools_session import session_token_usage
+from tools_session import all_sessions_token_usage, session_token_usage
 
 
 class MessageBox(Static):
@@ -215,9 +215,10 @@ class MimicodeApp(App):
         if cmd == "/help":
             text = (
                 "Slash commands:\n"
-                "  /help    show this message\n"
-                "  /clear   clear chat history and start a fresh conversation\n"
-                "  /usage   show token usage and estimated cost for this session"
+                "  /help        show this message\n"
+                "  /clear       clear chat history and start a fresh conversation\n"
+                "  /usage       token usage and estimated cost for this session\n"
+                "  /usage all   token usage and cost across all sessions"
             )
             box = MessageBox(text)
             box.add_class("tool")
@@ -236,16 +237,35 @@ class MimicodeApp(App):
             return True
 
         if cmd == "/usage":
-            u = session_token_usage(self.session.path)
-            text = (
-                f"Token usage — session: {self.session.id}\n"
-                f"  Input tokens:       {u['tokens_in']:,}\n"
-                f"  Output tokens:      {u['tokens_out']:,}\n"
-                f"  Cache read tokens:  {u['cache_read']:,}\n"
-                f"  Cache write tokens: {u['cache_write']:,}\n"
-                f"  Estimated cost:     ${u['cost_usd']:.4f}"
-            )
-            box = MessageBox(text)
+            args = prompt.split()
+            if len(args) > 1 and args[1].lower() == "all":
+                data = all_sessions_token_usage(self.session.path.parent)
+                lines = ["Token usage — all sessions\n"]
+                for row in data["sessions"]:
+                    lines.append(
+                        f"  {row['session']:<20} "
+                        f"in={row['tokens_in']:>8,}  "
+                        f"out={row['tokens_out']:>8,}  "
+                        f"${row['cost_usd']:.4f}"
+                    )
+                t = data["totals"]
+                lines.append(
+                    f"\n  {'TOTAL':<20} "
+                    f"in={t['tokens_in']:>8,}  "
+                    f"out={t['tokens_out']:>8,}  "
+                    f"${t['cost_usd']:.4f}"
+                )
+            else:
+                u = session_token_usage(self.session.path)
+                lines = [
+                    f"Token usage — session: {self.session.id}\n",
+                    f"  Input tokens:       {u['tokens_in']:,}",
+                    f"  Output tokens:      {u['tokens_out']:,}",
+                    f"  Cache read tokens:  {u['cache_read']:,}",
+                    f"  Cache write tokens: {u['cache_write']:,}",
+                    f"  Estimated cost:     ${u['cost_usd']:.4f}",
+                ]
+            box = MessageBox("\n".join(lines))
             box.add_class("tool")
             chat.mount(box)
             chat.scroll_end(animate=True)
