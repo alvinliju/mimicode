@@ -2,6 +2,7 @@
 import asyncio
 import os
 import sys
+import random
 
 from rich.text import Text
 from rich.markdown import Markdown
@@ -29,6 +30,24 @@ _TOOL   = "#dcdcaa"
 _OK     = "#6a9955"
 _ERR    = "#f44747"
 _ACCENT = "#007acc"
+
+# ---------------------------------------------------------------------------
+# Tool action synonyms and animation
+# ---------------------------------------------------------------------------
+_ANIMATION_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+_TOOL_SYNONYMS = {
+    "read": ["reading", "scanning", "parsing", "loading", "opening"],
+    "write": ["writing", "creating", "saving", "generating", "composing"],
+    "edit": ["editing", "modifying", "updating", "patching", "revising"],
+    "bash": ["executing", "running", "invoking", "processing", "launching"],
+    "memory_write": ["storing", "recording", "persisting", "archiving", "saving"],
+}
+
+def _get_tool_verb(tool_name: str) -> str:
+    """Get a random synonym verb for the tool action."""
+    synonyms = _TOOL_SYNONYMS.get(tool_name, [f"{tool_name}ing"])
+    return random.choice(synonyms)
 
 # ---------------------------------------------------------------------------
 # Slash command registry
@@ -217,6 +236,8 @@ class MimicodeApp(App):
         self._interrupted: bool = False
         self._last_tool_name: str = ""
         self._last_tool_args: dict = {}
+        self._animation_index: int = 0
+        self._animation_timer: asyncio.Task | None = None
 
     def compose(self) -> ComposeResult:
         yield Label(
@@ -265,6 +286,7 @@ class MimicodeApp(App):
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
         self._interrupted = True
+        self._stop_animation_timer()
         editor  = self.query_one(PromptEditor)
         self._clear_activity()
         self._current_text_blocks.clear()
@@ -439,16 +461,24 @@ class MimicodeApp(App):
         """Update the live activity widget. tool_name=None means 'thinking'."""
         widget = self.query_one("#activity", Static)
         if tool_name is None:
+            # Start animation for "thinking"
+            self._start_animation_timer()
             widget.update(Text.assemble((" ●  ", f"bold {_BOT}"), ("thinking…", _DIM)))
             widget.add_class("active")
             return
+        
         key = _key_arg(tool_name, args or {})
+        verb = _get_tool_verb(tool_name)
+        anim_char = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
+        
         line1 = Text.assemble(
-            (" ⚙  ", f"bold {_TOOL}"),
-            (f"{tool_name}  ", _TOOL),
+            (f" {anim_char}  ", f"bold {_TOOL}"),
+            (f"{verb}  ", _TOOL),
             (key, _DIM),
         )
         if result is not None:
+            # Stop animation when result is ready
+            self._stop_animation_timer()
             ok    = not (args or {}).get("_is_error")
             icon  = "✓" if ok else "✗"
             color = _OK if ok else _ERR
@@ -458,7 +488,13 @@ class MimicodeApp(App):
                 (preview, _DIM),
             )
         else:
-            line2 = Text.assemble((" └─    ", _DIM), ("running…", _DIM))
+            # Start animation for running tool
+            self._start_animation_timer()
+            anim_running = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
+            line2 = Text.assemble(
+                (f" └─ {anim_running}  ", _DIM), 
+                ("processing…", _DIM)
+            )
         content = Text()
         content.append_text(line1)
         content.append("\n")
@@ -467,9 +503,38 @@ class MimicodeApp(App):
         widget.add_class("active")
 
     def _clear_activity(self) -> None:
+        self._stop_animation_timer()
         widget = self.query_one("#activity", Static)
         widget.update(Text(""))
         widget.remove_class("active")
+    
+    def _start_animation_timer(self) -> None:
+        """Start the animation timer if not already running."""
+        if self._animation_timer is None or self._animation_timer.done():
+            self._animation_timer = asyncio.create_task(self._animate_activity())
+    
+    def _stop_animation_timer(self) -> None:
+        """Stop the animation timer."""
+        if self._animation_timer and not self._animation_timer.done():
+            self._animation_timer.cancel()
+            self._animation_timer = None
+    
+    async def _animate_activity(self) -> None:
+        """Continuously update the animation characters."""
+        try:
+            while True:
+                await asyncio.sleep(0.1)  # 100ms per frame
+                self._animation_index += 1
+                # Re-render the activity line with updated animation
+                if self._last_tool_name:
+                    self._set_activity(self._last_tool_name, self._last_tool_args)
+                else:
+                    # Update thinking animation
+                    widget = self.query_one("#activity", Static)
+                    anim_char = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
+                    widget.update(Text.assemble((f" {anim_char}  ", f"bold {_BOT}"), ("thinking…", _DIM)))
+        except asyncio.CancelledError:
+            pass
 
     def _update_header(self) -> None:
         self.query_one("#header", Label).update(
