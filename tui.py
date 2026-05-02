@@ -4,6 +4,8 @@ import os
 import sys
 
 from rich.text import Text
+from rich.markdown import Markdown
+from rich.padding import Padding
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -45,6 +47,18 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
 def _completions(prefix: str) -> list[tuple[str, str]]:
     p = prefix.lower()
     return [(cmd, desc) for cmd, desc in SLASH_COMMANDS if cmd.startswith(p)]
+
+
+def _key_arg(tool_name: str, args: dict) -> str:
+    """Extract the most informative single argument for the activity line."""
+    from pathlib import Path as _P
+    if tool_name in ("read", "write", "edit"):
+        p = args.get("path", "")
+        return _P(p).name if p else ""
+    if tool_name == "bash":
+        cmd = args.get("cmd", "")
+        return (cmd[:60] + "…") if len(cmd) > 60 else cmd
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -164,14 +178,13 @@ class MimicodeApp(App):
         padding: 0 1;
         scrollbar-size: 0 0;
     }}
-    #thinking {{
-        height: 1;
+    #activity {{
+        height: 2;
         background: {_BG};
         padding: 0 1;
-        color: {_DIM};
         display: none;
     }}
-    #thinking.active {{
+    #activity.active {{
         display: block;
     }}
     #footer-bar {{
@@ -201,6 +214,8 @@ class MimicodeApp(App):
         self._current_text_blocks: dict[int, str] = {}
         self._current_tool_blocks: dict[int, dict] = {}
         self._interrupted: bool = False
+        self._last_tool_name: str = ""
+        self._last_tool_args: dict = {}
 
     def compose(self) -> ComposeResult:
         yield Label(
@@ -208,7 +223,7 @@ class MimicodeApp(App):
             id="header",
         )
         yield RichLog(id="chat", markup=False, highlight=False, wrap=True, auto_scroll=True)
-        yield Label(" ● thinking…", id="thinking")
+        yield Static("", id="activity")
         yield AutocompleteBox(id="autocomplete")
         yield PromptEditor("", id="editor", language=None, show_line_numbers=False)
         yield Label("", id="footer-bar")
@@ -250,8 +265,7 @@ class MimicodeApp(App):
             self._agent_task.cancel()
         self._interrupted = True
         editor  = self.query_one(PromptEditor)
-        thinking = self.query_one("#thinking", Label)
-        thinking.remove_class("active")
+        self._clear_activity()
         self._current_text_blocks.clear()
         self._current_tool_blocks.clear()
         self._blank()
@@ -315,18 +329,18 @@ class MimicodeApp(App):
             }
         
         elif event_type == "tool_exec_start":
-            # Tool is actually executing now - show it with full args
             tool_name = data["name"]
-            args = data["args"]
-            self._tool_call(tool_name, args)
-            self._log().scroll_end(animate=False)
-        
+            args      = data["args"]
+            self._last_tool_name = tool_name
+            self._last_tool_args = args
+            self._set_activity(tool_name, args)
+
         elif event_type == "tool_exec_result":
-            # Tool execution completed - show result
-            output = data["output"]
+            output   = data["output"]
             is_error = data["is_error"]
-            self._tool_result(output, is_error)
-            self._log().scroll_end(animate=False)
+            args     = dict(self._last_tool_args)
+            args["_is_error"] = is_error
+            self._set_activity(self._last_tool_name, args, result=output)
     
     def _render_accumulated_text(self) -> None:
         """Render any accumulated text blocks."""
@@ -386,10 +400,14 @@ class MimicodeApp(App):
         if not text.strip():
             return
         self._blank()
-        lines = text.splitlines() or [""]
-        for i, line in enumerate(lines):
-            pfx = " ●   " if i == 0 else "     "
-            self._log().write(Text.assemble((pfx, f"bold {_BOT}"), (line, _FG)))
+        
+        # Write the bot indicator prefix
+        self._log().write(Text.assemble((" ●   ", f"bold {_BOT}")))
+        
+        # Render markdown content with left padding for alignment
+        md = Markdown(text)
+        padded = Padding(md, (0, 0, 0, 5))  # 5 spaces to align with "     " continuation
+        self._log().write(padded)
 
     def _tool_call(self, name: str, args: dict) -> None:
         parts = "  ".join(f"{k}={str(v)[:50]}" for k, v in (args or {}).items())
@@ -415,6 +433,42 @@ class MimicodeApp(App):
     # -----------------------------------------------------------------------
     # Footer
     # -----------------------------------------------------------------------
+
+    def _set_activity(self, tool_name: str | None = None, args: dict | None = None, result: str | None = None) -> None:
+        """Update the live activity widget. tool_name=None means 'thinking'."""
+        widget = self.query_one("#activity", Static)
+        if tool_name is None:
+            widget.update(Text.assemble((" ●  ", f"bold {_BOT}"), ("thinking…", _DIM)))
+            widget.add_class("active")
+            return
+        key = _key_arg(tool_name, args or {})
+        line1 = Text.assemble(
+            (" ⚙  ", f"bold {_TOOL}"),
+            (f"{tool_name}  ", _TOOL),
+            (key, _DIM),
+        )
+        if result is not None:
+            ok    = not (args or {}).get("_is_error")
+            icon  = "✓" if ok else "✗"
+            color = _OK if ok else _ERR
+            preview = result.replace("\n", "  ")[:80] + ("…" if len(result) > 80 else "")
+            line2 = Text.assemble(
+                (f" └─ {icon}  ", f"bold {color}"),
+                (preview, _DIM),
+            )
+        else:
+            line2 = Text.assemble((" └─    ", _DIM), ("running…", _DIM))
+        content = Text()
+        content.append_text(line1)
+        content.append("\n")
+        content.append_text(line2)
+        widget.update(content)
+        widget.add_class("active")
+
+    def _clear_activity(self) -> None:
+        widget = self.query_one("#activity", Static)
+        widget.update(Text(""))
+        widget.remove_class("active")
 
     def _update_header(self) -> None:
         self.query_one("#header", Label).update(
@@ -621,7 +675,7 @@ class MimicodeApp(App):
         self._user(prompt)
         self._log().scroll_end(animate=True)
 
-        self.query_one("#thinking", Label).add_class("active")
+        self._set_activity()
         editor.disabled    = True
         self.is_processing = True
         self._interrupted  = False
@@ -635,8 +689,7 @@ class MimicodeApp(App):
         )
 
     async def _run_agent(self, prompt: str, messages_snapshot: list) -> None:
-        editor   = self.query_one(PromptEditor)
-        thinking = self.query_one("#thinking", Label)
+        editor = self.query_one(PromptEditor)
         try:
             self.messages = await agent_turn(
                 prompt,
@@ -667,7 +720,7 @@ class MimicodeApp(App):
         finally:
             self._agent_task = None
             if not self._interrupted:
-                thinking.remove_class("active")
+                self._clear_activity()
                 self._update_footer()
                 self._log().scroll_end(animate=True)
                 editor.disabled    = False

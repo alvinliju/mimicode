@@ -1,0 +1,561 @@
+================================================================================
+MIMICODE CODEBASE ANALYSIS - PART 1: ARCHITECTURE & COMPONENTS
+================================================================================
+Generated: 2026-05-02
+Total Files: 7 core modules + 7 test files
+Lines of Code: ~3,000+ LOC
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+Mimicode is a minimal coding agent harness built around Claude AI with four
+core tools (read, write, edit, bash). The architecture is clean, modular, and
+focused on:
+
+- Deliberate tool use over broad operations
+- Session persistence and resume capability
+- Prompt caching for cost efficiency
+- Safety guardrails against dangerous commands
+- Memory system for cross-session knowledge retention
+
+The codebase follows a single-responsibility principle with clear separation
+between agent loop, tools, providers, logging, and UI.
+
+================================================================================
+2. ARCHITECTURE OVERVIEW
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                          ENTRY POINTS                                │
+│  agent.py --tui  →  TUI Mode (textual)                              │
+│  agent.py        →  REPL/One-shot CLI Mode                          │
+└─────────────────────────────────────────────────────────────────────┘
+                                  ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│                        AGENT LOOP (agent.py)                         │
+│  - agent_turn(): Main orchestration loop                            │
+│  - Message history management                                        │
+│  - Tool dispatch & result handling                                   │
+│  - Session context loading via mimi_memory                          │
+└─────────────────────────────────────────────────────────────────────┘
+                    ↓                              ↓
+┌──────────────────────────────┐    ┌─────────────────────────────────┐
+│    TOOLS (tools.py)          │    │  PROVIDERS (providers.py)       │
+│  - bash()  - read()          │    │  - call_claude()                │
+│  - write() - edit()          │    │  - call_claude_streaming()      │
+│  - Safety vetting (vet())    │    │  - Prompt caching logic         │
+│  - ANSI stripping            │    └─────────────────────────────────┘
+│  - Output truncation         │
+└──────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│                   LOGGING & PERSISTENCE                              │
+│  logger.py:    JSONL event stream (metadata only)                   │
+│  agent.py:     messages.json (full conversation)                    │
+│  mimi_memory:  .mimi/memory/ structured knowledge base              │
+└─────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+3. CORE MODULES BREAKDOWN
+================================================================================
+
+3.1 agent.py (365 lines)
+────────────────────────
+PURPOSE: Main orchestration loop and CLI entry point
+
+KEY FUNCTIONS:
+  - agent_turn():         Async agent loop, handles streaming/cancellation
+  - _dispatch():          Tool call dispatcher (includes memory_write)
+  - build_system():       System prompt construction + memory context
+  - load_messages():      Restore conversation from .messages.json
+  - save_messages():      Persist conversation state
+  - _run_one_shot():      Single prompt execution
+  - _run_repl():          Interactive REPL mode
+
+SYSTEM PROMPT FEATURES:
+  - Enforces rg (ripgrep) for all searches
+  - Bans find, grep -r, ls -R, cat for code files
+  - Demands read before edit
+  - edit requires exact match (once)
+  - write only for new files or full rewrites
+  - Output capped at 100KB
+
+TOOLS EXPOSED:
+  1. bash    - shell execution with safety vetting
+  2. read    - line-numbered file reading (default 2000 lines)
+  3. write   - file creation/overwrite
+  4. edit    - surgical find/replace (exact match once)
+  5. memory_write - persist component knowledge
+
+MEMORY INTEGRATION:
+  - Calls init_memory(session_id) on turn start
+  - Loads session context via load_session_context()
+  - Auto-updates session metadata after each turn
+  - Appends memory context to system prompt
+
+CANCELLATION SUPPORT:
+  - Accepts cancel_event: asyncio.Event
+  - Raises AgentInterrupted when cancelled
+  - TUI uses this for Ctrl+C/Esc interrupts
+
+
+3.2 tools.py (216 lines)
+────────────────────────
+PURPOSE: Tool implementations with safety checks
+
+SAFETY GUARDRAILS (vet() function):
+  Bans via regex pre-flight check:
+    - find commands         → "use rg --files"
+    - grep -r / grep -R     → "use rg 'pattern'"
+    - ls -R                 → "use rg --files"
+    - cat <code files>      → "use read tool"
+    - curl | sh / bash      → "refusing: unsafe"
+    - rm -rf on /, ~, *     → "refusing: dangerous target"
+
+BASH TOOL:
+  - asyncio.create_subprocess_shell
+  - Combined stdout+stderr
+  - ANSI escape sequence stripping
+  - Tail-truncation at 100KB
+  - Timeout support (kills process)
+  - Cancellation support (kills process, propagates)
+  - Empty output on error → synthesizes reason
+
+READ TOOL:
+  - Binary file detection (rejects if NUL byte in first 8KB)
+  - 1-indexed line numbers
+  - offset + limit parameters (default 2000 lines)
+  - Shows truncation notice if capped
+
+WRITE TOOL:
+  - Creates parent directories automatically
+  - Per-path mutex lock (asyncio.Lock) to serialize concurrent writes
+  - Returns byte count confirmation
+
+EDIT TOOL:
+  - old_text must match exactly once (not 0, not 2+)
+  - Per-path mutex lock to serialize edits
+  - Returns line number where replacement occurred
+  - Rejects binary files
+  - Rejects if old_text == new_text
+
+DESIGN NOTES:
+  - All tools return ToolResult dataclass (output, is_error, truncated, etc.)
+  - File locks prevent race conditions when agent makes parallel tool calls
+
+
+3.3 providers.py (211 lines)
+────────────────────────────
+PURPOSE: Anthropic Claude API wrapper with prompt caching
+
+DEFAULT MODEL: claude-sonnet-4-5-20250929
+DEFAULT MAX_TOKENS: 8192
+
+PROMPT CACHING STRATEGY (cache=True):
+  3 cache breakpoints:
+    1. Last tool in tools array     → caches entire tools block
+    2. System prompt                → caches system prompt
+    3. Last message content block   → caches entire conversation history
+
+  Cache duration: 5 minutes (Anthropic's ephemeral cache)
+  Cost savings: 10% of input tokens on cache hit (0.30 vs 3.00 per million)
+
+FUNCTIONS:
+  - call_claude():            Synchronous API call
+  - call_claude_streaming():  Async streaming with real-time events
+
+STREAMING EVENTS:
+  Emitted via on_event callback:
+    - text_start      → new text block
+    - text_delta      → text chunk received
+    - tool_start      → tool_use block starts
+    - tool_complete   → tool_use JSON finalized
+  
+  Handles:
+    - content_block_start/delta/stop
+    - message_delta (usage updates)
+    - message_stop (final usage)
+    - cancel_event checking
+
+USAGE TRACKING:
+  Logs to logger.py:
+    - tokens_in
+    - tokens_out
+    - cache_read_input_tokens
+    - cache_creation_input_tokens
+
+IMPLEMENTATION NOTES:
+  - Uses deepcopy to avoid mutating caller's inputs
+  - Promotes bare string content to blocks when needed for cache_control
+  - Accumulates tool_use JSON via input_json_delta events
+
+
+3.4 logger.py (77 lines)
+────────────────────────
+PURPOSE: JSONL event logging (metadata only, not full messages)
+
+SESSION MODEL:
+  - Session dataclass: id, start timestamp, path
+  - Module-level _current session
+  - start_session() rotates to new session
+
+LOG FORMAT (JSONL):
+  {"t": <elapsed_sec>, "session": "<id>", "kind": "<event>", "data": {...}}
+
+LOG EVENTS:
+  - session_start
+  - user_message
+  - model_request / model_request_streaming
+  - model_response / model_response_streaming
+  - tool_call / tool_result
+  - turn_end
+  - tui_start / tui_exit
+  - cmd_blocked
+
+STORAGE:
+  - sessions/<id>.jsonl    (event stream)
+  - Auto-creates sessions/ directory
+
+BACK-COMPAT:
+  - Exports SESSION_ID, SESSION_START, LOG_PATH for old code
+  - _refresh_module_globals() keeps them in sync
+
+
+3.5 mimi_memory.py (341 lines)
+──────────────────────────────
+PURPOSE: Structured JSON memory system for cross-session knowledge
+
+LAYOUT:
+  .mimi/memory/
+    index.json                    # lightweight global index
+    components/<name>.json        # per-component knowledge
+    decisions/<slug>.json         # architectural decisions
+    sessions/<id>/
+      meta.json                   # session focus, open issues, changes
+      refs.json                   # component entry IDs touched
+
+CORE FUNCTIONS:
+
+  INIT:
+    init_memory(session_id)
+      - Creates directory skeleton
+      - Initializes index.json, meta.json, refs.json if missing
+      - Idempotent (safe to call every run)
+
+  COMPONENTS:
+    write_component(name, summary, detail, related_files, tags, decisions, changes)
+      - Creates/updates components/<name>.json
+      - Upserts entry in index.json
+      - Tracks created_at (preserved on update) and updated_at
+
+    load_component(name) → dict | None
+
+  DECISIONS:
+    write_decision(slug, summary, detail, tags)
+      - Creates/updates decisions/<slug>.json
+      - Upserts entry in index.json
+
+  SESSIONS:
+    update_session_meta(session_id, summary, focus_files, open_issues, recent_changes)
+      - Always updates last_active timestamp
+      - Preserves unset fields (partial updates)
+
+    add_session_ref(session_id, entry_id)
+      - No duplicates
+
+    load_session_meta(session_id) → dict | None
+    load_session_refs(session_id) → list[str]
+
+  CONTEXT LOADING:
+    load_session_context(session_id) → str
+      - Returns formatted text block for system prompt
+      - Includes: summary, focus files, open issues, recent changes, component refs
+      - Returns "" if no metadata
+
+  AUTO-UPDATE:
+    auto_update_session(session_id, messages)
+      - Called after every agent turn
+      - Extracts touched files from tool_use blocks (read/write/edit)
+      - Merges into focus_files (most recent first, capped at 20)
+      - Auto-populates summary from last assistant text if blank
+
+  MEMORY_WRITE TOOL HANDLER:
+    handle_memory_write(session_id, args) → str
+      - Validates component + summary required
+      - Calls write_component()
+      - Adds session ref
+      - Optionally records change_entry and open_issues
+
+HELPER FUNCTIONS:
+  _extract_touched_files(messages)
+    - Scans all tool_use blocks for path/file arguments
+    - Returns deduplicated list in order seen
+
+  _extract_last_assistant_text(messages)
+    - Finds last assistant text block
+    - Truncates to 200 chars
+    - Used for auto-summary
+
+  _count_turns(messages)
+    - Counts user messages with string content
+
+
+3.6 tools_session.py (78 lines)
+───────────────────────────────
+PURPOSE: Session analysis tools (token usage, cost estimation)
+
+PRICING (Claude Sonnet per million tokens):
+  input:       $3.00
+  output:     $15.00
+  cache_read:  $0.30
+  cache_write: $3.75
+
+FUNCTIONS:
+  session_stats(session_path)
+    - Counts events by kind
+    - Returns duration in seconds
+
+  session_token_usage(session_path)
+    - Sums tokens_in, tokens_out, cache_read, cache_write
+    - Calculates cost_usd
+    - Returns dict with breakdown
+
+  all_sessions_token_usage(sessions_dir)
+    - Aggregates across all .jsonl files
+    - Returns per-session breakdown + totals
+
+USAGE:
+  - Used by TUI footer for real-time cost display
+  - Used by /usage and /usage all commands
+
+
+3.7 tui.py (741 lines)
+──────────────────────
+PURPOSE: Interactive TUI using textual library (pi-style chat interface)
+
+ARCHITECTURE:
+  - MimicodeApp extends textual.app.App
+  - Widgets: RichLog (chat), PromptEditor (input), Labels, Static
+
+LAYOUT:
+  #header      → session info, keyboard shortcuts
+  #chat        → scrolling chat log (RichLog)
+  #activity    → live tool execution status (2 lines, hidden when idle)
+  #autocomplete → floating slash command suggestions
+  #editor      → multi-line input (PromptEditor)
+  #footer-bar  → token usage, cost, session ID
+
+COLOR PALETTE (VS Code Dark+ inspired):
+  Background:  #1e1e1e, #252526
+  Text:        #cccccc (main), #6a6a6a (dim)
+  User:        #569cd6 (blue)
+  Bot:         #4ec9b0 (cyan)
+  Tool:        #dcdcaa (yellow)
+  Success:     #6a9955 (green)
+  Error:       #f44747 (red)
+  Accent:      #007acc (blue)
+
+KEY FEATURES:
+
+  STREAMING:
+    - _handle_stream_event() processes real-time events from agent
+    - Accumulates text_delta events, renders on tool_start/tool_complete
+    - Shows live activity panel during tool execution
+    - Activity panel shows:
+        Line 1: tool name + key argument (path for read/write/edit, cmd for bash)
+        Line 2: result preview (✓/✗ + truncated output)
+
+  INTERRUPTION:
+    - Ctrl+C:  Cancel agent, clear prompt
+    - Esc:     Cancel agent, restore prompt
+    - Sets _cancel_event, cancels _agent_task
+    - Restores editor state immediately (no waiting)
+
+  SLASH COMMANDS:
+    /help                → show command list
+    /clear               → clear chat history
+    /exit                → quit application
+    /new                 → start fresh session
+    /session <name>      → switch to/create session
+    /sessions            → list all sessions with costs
+    /usage               → token usage for current session
+    /usage all           → token usage across all sessions
+
+  AUTOCOMPLETE:
+    - Tab key: completes to top suggestion
+    - Shows floating box above editor with matches
+    - Works for /commands and /session <partial-id>
+
+  FOCUS LOCK:
+    - Editor always has focus
+    - Blocks tab/shift+tab from cycling to other widgets
+    - Clicking RichLog snaps focus back to editor
+
+  RENDERING:
+    - All output uses rich.text.Text (no raw markup strings)
+    - Prevents markup injection attacks
+    - Line-by-line rendering with prefix labels (you/●/⚙/✓/✗)
+
+  FOOTER:
+    - Real-time updates after each turn
+    - Shows: model name, total tokens (k), cost (USD), session ID
+    - Gracefully handles errors (falls back to session ID only)
+
+BINDINGS:
+  Ctrl+D → quit
+  Ctrl+C → interrupt (clear prompt)
+  Esc    → interrupt (restore prompt)
+
+
+================================================================================
+4. DATA FLOW
+================================================================================
+
+ONE-SHOT EXECUTION:
+  1. agent.py parses CLI args
+  2. start_session(id) creates/resumes session
+  3. agent_turn(prompt, cwd, session_id)
+     a. init_memory(session_id)
+     b. load_session_context(session_id) → append to system prompt
+     c. Loop up to 25 steps:
+        - call_claude() or call_claude_streaming()
+        - For each tool_use: _dispatch() → tool function
+        - Append tool_result to messages
+        - Break if no tool_use in response
+     d. auto_update_session(session_id, messages)
+  4. save_messages(session_path, messages)
+  5. Print last assistant text
+
+TUI STREAMING EXECUTION:
+  1. User submits prompt via PromptEditor
+  2. _user(prompt) renders user message
+  3. _set_activity() shows "thinking…"
+  4. agent_turn() with on_stream_event=_handle_stream_event
+     - text_start/text_delta: accumulate text
+     - tool_start: render accumulated text, show tool in activity panel
+     - tool_exec_start: update activity panel with args
+     - tool_exec_result: update activity panel with result preview
+     - tool_complete: finalize tool JSON
+  5. _render_accumulated_text() shows final assistant message
+  6. save_messages()
+  7. _update_footer() recalculates token usage
+  8. _clear_activity(), restore editor
+
+MEMORY WRITE FLOW:
+  1. Agent calls memory_write tool
+  2. _dispatch() routes to handle_memory_write()
+  3. write_component(name, summary, detail, ...)
+     a. Creates/updates .mimi/memory/components/<name>.json
+     b. Upserts index.json entry
+  4. add_session_ref(session_id, "<name>-component")
+  5. Optionally update session meta (change_entry, open_issues)
+  6. Returns confirmation string
+
+
+================================================================================
+5. TESTING STRATEGY
+================================================================================
+
+COVERAGE: 124 tests across 6 modules
+
+test_agent.py (15 tests)
+  - Turn end conditions (no tool_use, max_steps)
+  - Tool dispatch and error handling
+  - Message persistence (save/load)
+  - CLI argument parsing
+  - Parallel tool use in single response
+
+test_logger.py (5 tests)
+  - JSONL writing
+  - Session rotation
+  - Event counting
+
+test_mimi_memory.py (28 tests)
+  - init_memory idempotency
+  - Component write/load/upsert
+  - Decision tracking
+  - Session meta/refs management
+  - File extraction from messages
+  - Auto-update logic
+  - Context loading
+  - memory_write tool handler
+
+test_providers.py (9 tests)
+  - Message shape validation
+  - Cache control attachment (system, tools, messages)
+  - Input mutation prevention
+  - Live smoke test (requires ANTHROPIC_API_KEY)
+
+test_tools.py (67 tests)
+  - bash: exit codes, stderr, ANSI stripping, truncation, timeout, cancellation
+  - read: missing files, directories, binary detection, offset/limit, cwd
+  - write: creation, overwrite, parent dirs, concurrency
+  - edit: unique match, not found, multiple matches, identical check
+  - vet(): 30+ test cases for banned vs allowed commands
+  - Error message synthesis for empty output
+
+test_tools_session.py (1 test)
+  - session_stats parsing
+
+TEST FIXTURES:
+  - isolated_memory (pytest fixture): redirects MEMORY_ROOT to tmp_path
+  - Prevents test pollution of .mimi/memory/
+
+INTEGRATION TESTS:
+  - test_call_claude_live_smoke: actual API call (skipped if no key)
+
+
+================================================================================
+6. KEY DESIGN DECISIONS
+================================================================================
+
+6.1 SEPARATION OF CONCERNS
+  - Tools know nothing about Claude API
+  - Providers know nothing about tools
+  - Agent orchestrates but delegates all logic
+  - Logger is pure I/O, no business logic
+  - Memory system is self-contained
+
+6.2 ASYNC THROUGHOUT
+  - All tools are async (even read/write) for consistency
+  - Allows cancellation support in every layer
+  - File locks prevent race conditions
+
+6.3 PROMPT CACHING
+  - Three-tier cache: tools, system, conversation
+  - Caches entire conversation history on every turn
+  - 5-minute TTL means multi-turn sessions get massive savings
+  - Example: 10-turn session with 50k context → ~450k tokens cached
+
+6.4 SAFETY FIRST
+  - Pre-flight vetting before bash execution
+  - Output truncation prevents OOM
+  - Binary file rejection prevents garbage output
+  - Exact-match-once edit prevents mass destruction
+
+6.5 SESSION PERSISTENCE
+  - Two files per session:
+      .jsonl      → structured event log (for analysis)
+      .messages.json → full conversation (for resume)
+  - Allows exact resume from any point
+  - Enables cost analysis, debugging, replay
+
+6.6 MEMORY SYSTEM DESIGN
+  - Explicit memory_write tool (agent decides what to remember)
+  - Automatic passive tracking (files touched, last_active)
+  - Index for fast lookup
+  - Session-scoped refs for context relevance
+  - Auto-summary from last assistant message when blank
+
+6.7 TUI DESIGN PHILOSOPHY
+  - No markup in chat log (prevents injection)
+  - Focus-locked editor (no accidental loss of focus)
+  - Immediate interrupt (no waiting for API response)
+  - Real-time streaming (shows progress, not just final result)
+  - Footer shows cost (user always aware of spend)
+
+
+================================================================================
+END OF PART 1
+================================================================================
