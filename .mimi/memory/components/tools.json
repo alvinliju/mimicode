@@ -12,7 +12,7 @@
     "edit"
   ],
   "summary": "Four core tools: bash (rg-enforced), read, write, edit \u2014 all return ToolResult",
-  "detail": "tools.py implements bash (blocks find/grep -r/ls -R/cat, enforces rg), read (line-numbered, offset/limit), write (creates parent dirs), edit (find/replace, must match exactly once). ToolResult(output, is_error). agent.py guarantees output is non-empty when is_error=True.",
+  "detail": "",
   "decisions": [],
   "changes": []
 }

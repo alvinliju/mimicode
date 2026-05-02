@@ -212,6 +212,76 @@ def load_session_context(session_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Init — auto-create skeleton on first run
+# ---------------------------------------------------------------------------
+
+def init_memory(session_id: str) -> None:
+    """Create .mimi/memory skeleton if it doesn't exist. Safe to call every run."""
+    _ensure_dir(MEMORY_ROOT / "components")
+    _ensure_dir(MEMORY_ROOT / "decisions")
+    _ensure_dir(_session_dir(session_id))
+
+    if not INDEX_PATH.exists():
+        _write_json(INDEX_PATH, [])
+
+    meta_path = _session_dir(session_id) / "meta.json"
+    if not meta_path.exists():
+        today = date.today().isoformat()
+        _write_json(meta_path, {
+            "id": session_id,
+            "started": today,
+            "last_active": today,
+            "focus_files": [],
+            "summary": "",
+            "open_issues": [],
+            "recent_changes": [],
+        })
+
+    refs_path = _session_dir(session_id) / "refs.json"
+    if not refs_path.exists():
+        _write_json(refs_path, [])
+
+
+# ---------------------------------------------------------------------------
+# Auto-update — called after each agent turn to track activity passively
+# ---------------------------------------------------------------------------
+
+def _extract_touched_files(messages: list[dict]) -> list[str]:
+    """Scan the last assistant turn's tool_uses for file paths."""
+    files: list[str] = []
+    # walk backwards to find the last assistant message with tool_uses
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        for block in msg.get("content", []):
+            if block.get("type") == "tool_use":
+                inp = block.get("input", {}) or {}
+                path = inp.get("path") or inp.get("file")
+                if path and path not in files:
+                    files.append(path)
+        if files:
+            break
+    return files
+
+
+def auto_update_session(session_id: str, messages: list[dict]) -> None:
+    """Passively update session meta after a turn — touched files and last_active."""
+    touched = _extract_touched_files(messages)
+    if not touched and not session_id:
+        return
+
+    meta = load_session_meta(session_id) or {}
+    existing = meta.get("focus_files", [])
+    # merge without duplicates, most-recent first
+    merged = list(dict.fromkeys(touched + existing))[:20]
+
+    update_session_meta(
+        session_id=session_id,
+        focus_files=merged if merged else None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # memory_write tool handler — called when agent uses the memory_write tool
 # ---------------------------------------------------------------------------
 

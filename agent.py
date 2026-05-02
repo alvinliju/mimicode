@@ -21,7 +21,7 @@ from datetime import date
 from pathlib import Path
 
 from logger import log, start_session
-from mimi_memory import handle_memory_write, load_session_context
+from mimi_memory import auto_update_session, handle_memory_write, init_memory, load_session_context
 from providers import call_claude
 from tools import bash, edit, read, write
 
@@ -202,6 +202,8 @@ async def agent_turn(
     starts fresh if None) and returns the extended list. pass the same list
     back in next call to continue the conversation."""
     log("user_message", {"chars": len(user_msg), "resumed": bool(messages)})
+    if session_id:
+        init_memory(session_id)
     if messages is None:
         messages = []
     messages.append({"role": "user", "content": user_msg})
@@ -213,6 +215,8 @@ async def agent_turn(
         tool_uses = [b for b in assistant["content"] if b.get("type") == "tool_use"]
         if not tool_uses:
             log("turn_end", {"steps": step + 1, "reason": "no_tool_use"})
+            if session_id:
+                auto_update_session(session_id, messages)
             return messages
         results = []
         for tu in tool_uses:
@@ -227,6 +231,8 @@ async def agent_turn(
             )
         messages.append({"role": "user", "content": results})
     log("turn_end", {"steps": max_steps, "reason": "max_steps"})
+    if session_id:
+        auto_update_session(session_id, messages)
     return messages
 
 

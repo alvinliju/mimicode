@@ -13,21 +13,7 @@
     "cli"
   ],
   "summary": "Core agent loop: tool dispatch, session persistence, REPL + one-shot modes, TUI launch",
-  "detail": "agent.py contains agent_turn() which drives the Claude API loop with up to 25 steps. Tools: bash, read, write, edit, memory_write. Sessions persist to sessions/<id>.jsonl (event log) and sessions/<id>.messages.json (full conversation). build_system() injects memory context when session_id is provided. CLI: `python agent.py [--tui] [-s session_id] [prompt]`",
-  "decisions": [
-    "memory_write is a tool (not auto-written) so agent controls when it records",
-    "session_id threaded through agent_turn so memory context is per-session"
-  ],
-  "changes": [
-    {
-      "file": "agent.py",
-      "what": "Added memory_write tool + session context injection",
-      "why": "mimi_memory integration"
-    },
-    {
-      "file": "agent.py",
-      "what": "Added --tui flag",
-      "why": "launch tui.py from main entry point"
-    }
-  ]
+  "detail": "agent.py drives Claude API loop up to 25 steps. Tools: bash, read, write, edit, memory_write. Sessions: sessions/<id>.jsonl + sessions/<id>.messages.json. build_system() injects memory context when session_id provided.",
+  "decisions": [],
+  "changes": []
 }
