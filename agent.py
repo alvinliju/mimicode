@@ -5,6 +5,8 @@ CLI:
   python agent.py -s mysession "your prompt"    # named session (new or resume)
   python agent.py -s mysession                  # resume session in REPL
   python agent.py                               # new session in REPL
+  python agent.py --tui                         # launch TUI mode
+  python agent.py --tui -s mysession            # launch TUI with named session
 
 Sessions persist to:
   sessions/<id>.jsonl          rlog event stream (metadata only)
@@ -239,6 +241,7 @@ async def _run_repl(session_path: Path, cwd: str) -> None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="agent", description="mimicode coding agent")
     p.add_argument("-s", "--session", metavar="ID", help="session id (new or resume)")
+    p.add_argument("--tui", action="store_true", help="launch TUI (Text User Interface) mode")
     p.add_argument("prompt", nargs="*", help="prompt (omit for REPL)")
     return p.parse_args(argv)
 
@@ -248,6 +251,12 @@ def main(argv: list[str] | None = None) -> None:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("error: ANTHROPIC_API_KEY not set", file=sys.stderr)
         sys.exit(1)
+
+    # Launch TUI mode if requested
+    if args.tui:
+        from tui import main as tui_main
+        tui_main(session_id=args.session)
+        return
 
     sess = start_session(args.session)
     prompt = " ".join(args.prompt).strip()
