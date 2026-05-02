@@ -1,2 +1,7 @@
 anthropic>=0.40
 pytest>=8.0
+textual>=0.47.0
+
+# memory
+fastembed>=0.4
+sqlite-vec>=0.1.6

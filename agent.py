@@ -5,6 +5,8 @@ CLI:
   python agent.py -s mysession "your prompt"    # named session (new or resume)
   python agent.py -s mysession                  # resume session in REPL
   python agent.py                               # new session in REPL
+  python agent.py --tui                         # launch TUI mode
+  python agent.py --tui -s mysession            # launch TUI with named session
 
 Sessions persist to:
   sessions/<id>.jsonl          rlog event stream (metadata only)
@@ -19,7 +21,8 @@ from datetime import date
 from pathlib import Path
 
 from logger import log, start_session
-from providers import call_claude
+from mimi_memory import auto_update_session, handle_memory_write, init_memory, load_session_context
+from providers import call_claude, call_claude_streaming
 from tools import bash, edit, read, write
 
 SYSTEM_PROMPT = """You are a coding agent in a minimal harness called mimicode.
@@ -46,7 +49,8 @@ EDITING RULES:
 STYLE:
 - Prefer one targeted tool call over a broad one. Scope searches.
 - Tool output is capped at 100KB. If you hit that, your scope was too wide.
-- Be concise. Cite file:line where relevant."""
+- Be concise. Cite file:line where relevant.
+- Do NOT create markdown (.md) files to summarize what is happening. Respond directly to the user."""
 
 TOOLS = [
     {
@@ -105,13 +109,45 @@ TOOLS = [
             "required": ["path", "old_text", "new_text"],
         },
     },
+    {
+        "name": "memory_write",
+        "description": (
+            "Persist what you just did to .mimi/memory so future sessions can load it efficiently. "
+            "Call this after completing a task or making a significant change. "
+            "Use component names like 'tui', 'agent', 'logger', 'tools', etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string", "description": "Component name (e.g. 'tui', 'agent')"},
+                "summary": {"type": "string", "description": "One-line summary of the current state of this component"},
+                "detail": {"type": "string", "description": "Full explanation of what was done and why"},
+                "related_files": {"type": "array", "items": {"type": "string"}, "description": "File paths touched"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "open_issues": {"type": "array", "items": {"type": "string"}, "description": "Unresolved issues to carry forward"},
+                "change_entry": {
+                    "type": "object",
+                    "description": "Record of the specific change made this turn",
+                    "properties": {
+                        "file": {"type": "string"},
+                        "what": {"type": "string"},
+                        "why": {"type": "string"},
+                    },
+                },
+            },
+            "required": ["component", "summary"],
+        },
+    },
 ]
 
 _TOOL_FNS = {"bash": bash, "read": read, "write": write, "edit": edit}
 
 
-def build_system(cwd: str) -> str:
-    return f"{SYSTEM_PROMPT}\n\nCurrent date: {date.today().isoformat()}\nCurrent working directory: {cwd}"
+def build_system(cwd: str, memory_context: str = "") -> str:
+    base = f"{SYSTEM_PROMPT}\n\nCurrent date: {date.today().isoformat()}\nCurrent working directory: {cwd}"
+    if memory_context:
+        return f"{base}\n\n{memory_context}"
+    return base
 
 
 def messages_path(session_path: Path) -> Path:
@@ -138,18 +174,26 @@ def save_messages(session_path: Path, messages: list[dict]) -> None:
     mp.write_text(json.dumps(messages, indent=2))
 
 
-async def _dispatch(name: str, args: dict, cwd: str):
-    fn = _TOOL_FNS.get(name)
-    if fn is None:
-        from tools import ToolResult
-        return ToolResult(output=f"[error] unknown tool: {name}", is_error=True)
+async def _dispatch(name: str, args: dict, cwd: str, session_id: str | None = None):
+    from tools import ToolResult
     log("tool_call", {"name": name, "args_keys": list(args.keys())})
-    result = await fn(cwd=cwd, **args)
-    # invariant: anthropic rejects tool_result with is_error=true and empty content.
-    if result.is_error and not result.output:
-        result.output = "[error] (no output)"
+    if name == "memory_write":
+        output = handle_memory_write(session_id or "", args)
+        result = ToolResult(output=output, is_error=False)
+    else:
+        fn = _TOOL_FNS.get(name)
+        if fn is None:
+            result = ToolResult(output=f"[error] unknown tool: {name}", is_error=True)
+        else:
+            result = await fn(cwd=cwd, **args)
+        if result.is_error and not result.output:
+            result.output = "[error] (no output)"
     log("tool_result", {"name": name, "is_error": result.is_error, "bytes": len(result.output)})
     return result
+
+
+class AgentInterrupted(Exception):
+    """Raised when a cancel_event is set during agent_turn."""
 
 
 async def agent_turn(
@@ -157,35 +201,79 @@ async def agent_turn(
     messages: list[dict] | None = None,
     cwd: str = ".",
     max_steps: int = 25,
+    session_id: str | None = None,
+    on_stream_event=None,
+    cancel_event: asyncio.Event | None = None,
 ) -> list[dict]:
-    """run one user turn to completion. appends user_msg to `messages` (or
-    starts fresh if None) and returns the extended list. pass the same list
-    back in next call to continue the conversation."""
+    """run one user turn to completion. returns extended messages list.
+    Set cancel_event to interrupt mid-turn; raises AgentInterrupted."""
     log("user_message", {"chars": len(user_msg), "resumed": bool(messages)})
+    if session_id:
+        init_memory(session_id)
     if messages is None:
         messages = []
     messages.append({"role": "user", "content": user_msg})
-    system = build_system(cwd)
+    memory_context = load_session_context(session_id) if session_id else ""
+    system = build_system(cwd, memory_context)
+
+    def _check_cancel():
+        if cancel_event and cancel_event.is_set():
+            raise AgentInterrupted
+
     for step in range(max_steps):
-        assistant = await call_claude(messages, system=system, tools=TOOLS)
+        _check_cancel()
+
+        if on_stream_event:
+            assistant = await call_claude_streaming(
+                messages, system=system, tools=TOOLS,
+                on_event=on_stream_event, cancel_event=cancel_event,
+            )
+        else:
+            assistant = await call_claude(messages, system=system, tools=TOOLS)
+
+        _check_cancel()
+
         messages.append(assistant)
         tool_uses = [b for b in assistant["content"] if b.get("type") == "tool_use"]
         if not tool_uses:
             log("turn_end", {"steps": step + 1, "reason": "no_tool_use"})
+            if session_id:
+                auto_update_session(session_id, messages)
             return messages
+
         results = []
         for tu in tool_uses:
-            result = await _dispatch(tu["name"], tu.get("input", {}) or {}, cwd)
-            results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tu["id"],
-                    "content": result.output,
+            _check_cancel()
+
+            if on_stream_event:
+                await on_stream_event("tool_exec_start", {
+                    "name": tu["name"],
+                    "args": tu.get("input", {}) or {},
+                })
+
+            result = await _dispatch(tu["name"], tu.get("input", {}) or {}, cwd, session_id)
+
+            _check_cancel()
+
+            if on_stream_event:
+                await on_stream_event("tool_exec_result", {
+                    "name": tu["name"],
+                    "output": result.output,
                     "is_error": result.is_error,
-                }
-            )
+                })
+
+            results.append({
+                "type": "tool_result",
+                "tool_use_id": tu["id"],
+                "content": result.output,
+                "is_error": result.is_error,
+            })
+
         messages.append({"role": "user", "content": results})
+
     log("turn_end", {"steps": max_steps, "reason": "max_steps"})
+    if session_id:
+        auto_update_session(session_id, messages)
     return messages
 
 
@@ -206,17 +294,17 @@ def _print_final(messages: list[dict]) -> None:
         print(text)
 
 
-async def _run_one_shot(prompt: str, session_path: Path, cwd: str) -> None:
+async def _run_one_shot(prompt: str, session_path: Path, cwd: str, session_id: str) -> None:
     messages = load_messages(session_path)
     resumed = bool(messages)
     if resumed:
         print(f"[mimicode] resumed {len(messages)} prior messages", file=sys.stderr)
-    messages = await agent_turn(prompt, messages=messages, cwd=cwd)
+    messages = await agent_turn(prompt, messages=messages, cwd=cwd, session_id=session_id)
     save_messages(session_path, messages)
     _print_final(messages)
 
 
-async def _run_repl(session_path: Path, cwd: str) -> None:
+async def _run_repl(session_path: Path, cwd: str, session_id: str) -> None:
     messages = load_messages(session_path)
     if messages:
         print(f"[mimicode] resumed {len(messages)} prior messages", file=sys.stderr)
@@ -229,7 +317,7 @@ async def _run_repl(session_path: Path, cwd: str) -> None:
             break
         if not prompt or prompt in (":q", ":quit", ":exit"):
             break
-        messages = await agent_turn(prompt, messages=messages, cwd=cwd)
+        messages = await agent_turn(prompt, messages=messages, cwd=cwd, session_id=session_id)
         save_messages(session_path, messages)
         _print_final(messages)
         print()  # blank line between turns
@@ -239,6 +327,7 @@ async def _run_repl(session_path: Path, cwd: str) -> None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="agent", description="mimicode coding agent")
     p.add_argument("-s", "--session", metavar="ID", help="session id (new or resume)")
+    p.add_argument("--tui", action="store_true", help="launch TUI (Text User Interface) mode")
     p.add_argument("prompt", nargs="*", help="prompt (omit for REPL)")
     return p.parse_args(argv)
 
@@ -248,6 +337,12 @@ def main(argv: list[str] | None = None) -> None:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("error: ANTHROPIC_API_KEY not set", file=sys.stderr)
         sys.exit(1)
+
+    # Launch TUI mode if requested
+    if args.tui:
+        from tui import main as tui_main
+        tui_main(session_id=args.session)
+        return
 
     sess = start_session(args.session)
     prompt = " ".join(args.prompt).strip()
@@ -261,9 +356,9 @@ def main(argv: list[str] | None = None) -> None:
 
     cwd = os.getcwd()
     if prompt:
-        asyncio.run(_run_one_shot(prompt, sess.path, cwd))
+        asyncio.run(_run_one_shot(prompt, sess.path, cwd, sess.id))
     else:
-        asyncio.run(_run_repl(sess.path, cwd))
+        asyncio.run(_run_repl(sess.path, cwd, sess.id))
 
 
 if __name__ == "__main__":
