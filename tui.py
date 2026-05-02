@@ -42,6 +42,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/sessions",  "list all sessions"),
     ("/usage",     "token usage — this session"),
     ("/usage all", "token usage — all sessions"),
+    ("/cwd",       "change working directory"),
 ]
 
 def _completions(prefix: str) -> list[tuple[str, str]]:
@@ -219,7 +220,7 @@ class MimicodeApp(App):
 
     def compose(self) -> ComposeResult:
         yield Label(
-            f"mimicode  ·  {self.session.id}  ·  shift+enter for newline  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+d quit",
+            f"mimicode  ·  {self.session.id}  ·  {self.cwd}  ·  shift+enter for newline  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+d quit",
             id="header",
         )
         yield RichLog(id="chat", markup=False, highlight=False, wrap=True, auto_scroll=True)
@@ -472,7 +473,7 @@ class MimicodeApp(App):
 
     def _update_header(self) -> None:
         self.query_one("#header", Label).update(
-            f"mimicode  ·  {self.session.id}  ·  shift+enter for newline"
+            f"mimicode  ·  {self.session.id}  ·  {self.cwd}  ·  shift+enter for newline"
             f"  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+d quit"
         )
 
@@ -554,6 +555,7 @@ class MimicodeApp(App):
                 "  /sessions          list all sessions",
                 "  /usage             token usage for this session",
                 "  /usage all         token usage across all sessions",
+                "  /cwd [path]        change working directory (no arg = show current)",
             ]:
                 self._sys(line)
             self._log().scroll_end(animate=True)
@@ -646,6 +648,38 @@ class MimicodeApp(App):
                 self._sys(f"  cache read    {u['cache_read']:,}")
                 self._sys(f"  cache write   {u['cache_write']:,}")
                 self._sys(f"  est. cost     ${u['cost_usd']:.4f}")
+            self._log().scroll_end(animate=True)
+            return True
+
+        if cmd == "/cwd":
+            if len(args) < 2:
+                # Show current working directory
+                self._blank()
+                self._sys(f"current working directory: {self.cwd}")
+                self._log().scroll_end(animate=True)
+                return True
+            
+            # Change to new directory
+            new_path = " ".join(args[1:])  # support paths with spaces
+            try:
+                # Resolve and validate the path
+                resolved = os.path.abspath(os.path.expanduser(new_path))
+                if not os.path.isdir(resolved):
+                    self._sys(f"error: not a directory: {new_path}")
+                    self._log().scroll_end(animate=True)
+                    return True
+                
+                old_cwd = self.cwd
+                self.cwd = resolved
+                os.chdir(self.cwd)  # Also change the process cwd
+                self._update_header()
+                self._blank()
+                self._sys(f"changed working directory")
+                self._sys(f"  from: {old_cwd}")
+                self._sys(f"  to:   {self.cwd}")
+                log("cwd_changed", {"old": old_cwd, "new": self.cwd, "session_id": self.session.id})
+            except (OSError, ValueError) as e:
+                self._sys(f"error changing directory: {e}")
             self._log().scroll_end(animate=True)
             return True
 
