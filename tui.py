@@ -35,6 +35,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help",      "show available commands"),
     ("/clear",     "clear chat history"),
     ("/exit",      "exit the application"),
+    ("/new",       "start a fresh session"),
+    ("/session",   "switch to or create a session"),
+    ("/sessions",  "list all sessions"),
     ("/usage",     "token usage — this session"),
     ("/usage all", "token usage — all sessions"),
 ]
@@ -340,13 +343,17 @@ class MimicodeApp(App):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         text = event.text_area.text
         box  = self.query_one(AutocompleteBox)
-        if text.startswith("/") and not self.is_processing:
-            matches = _completions(text.strip())
-            self._current_completions = matches
-            box.show_completions(matches)
-        else:
+        if self.is_processing or not text.startswith("/"):
             self._current_completions = []
             box.hide()
+            return
+        if text.startswith("/session "):
+            partial = text[len("/session "):]
+            matches = self._session_completions(partial)
+        else:
+            matches = _completions(text.strip())
+        self._current_completions = matches
+        box.show_completions(matches)
 
     def on_prompt_editor_tab_pressed(self, event: PromptEditor.TabPressed) -> None:
         if not self._current_completions:
@@ -409,6 +416,24 @@ class MimicodeApp(App):
     # Footer
     # -----------------------------------------------------------------------
 
+    def _update_header(self) -> None:
+        self.query_one("#header", Label).update(
+            f"mimicode  ·  {self.session.id}  ·  shift+enter for newline"
+            f"  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+d quit"
+        )
+
+    def _session_completions(self, partial: str) -> list[tuple[str, str]]:
+        sessions_dir = self.session.path.parent
+        ids = sorted(
+            (p.stem for p in sessions_dir.glob("*.jsonl")),
+            key=lambda sid: (sessions_dir / f"{sid}.jsonl").stat().st_mtime,
+            reverse=True,
+        )
+        return [
+            (f"/session {sid}", "current" if sid == self.session.id else "resume")
+            for sid in ids if sid.startswith(partial)
+        ]
+
     def _update_footer(self) -> None:
         try:
             u      = session_token_usage(self.session.path)
@@ -467,11 +492,14 @@ class MimicodeApp(App):
         if cmd == "/help":
             self._blank()
             for line in [
-                "  /help        show this message",
-                "  /clear       clear chat history",
-                "  /exit        exit the application",
-                "  /usage       token usage for this session",
-                "  /usage all   token usage across all sessions",
+                "  /help              show this message",
+                "  /clear             clear chat history",
+                "  /exit              exit the application",
+                "  /new               start a fresh session",
+                "  /session <name>    switch to or create a session",
+                "  /sessions          list all sessions",
+                "  /usage             token usage for this session",
+                "  /usage all         token usage across all sessions",
             ]:
                 self._sys(line)
             self._log().scroll_end(animate=True)
@@ -489,6 +517,49 @@ class MimicodeApp(App):
             self._sys("exiting...")
             log("tui_exit", {"session_id": self.session.id, "via": "slash_command"})
             self.exit()
+            return True
+
+        if cmd == "/new":
+            self.session  = start_session()
+            self.messages = []
+            self._log().clear()
+            self._update_header()
+            self._update_footer()
+            self._sys(f"new session · {self.session.id}")
+            self._log().scroll_end(animate=True)
+            return True
+
+        if cmd == "/session":
+            if len(args) < 2:
+                self._sys("usage: /session <name>")
+                self._log().scroll_end(animate=True)
+                return True
+            sid = args[1]
+            self.session  = start_session(sid)
+            self.messages = load_messages(self.session.path)
+            self._log().clear()
+            self._update_header()
+            self._update_footer()
+            if self.messages:
+                self._render_history()
+                n = sum(1 for m in self.messages if m["role"] == "user" and isinstance(m.get("content"), str))
+                self._sys(f"switched to {sid} · {n} prior turns")
+            else:
+                self._sys(f"new session · {sid}")
+            self._log().scroll_end(animate=True)
+            return True
+
+        if cmd == "/sessions":
+            sessions_dir = self.session.path.parent
+            paths = sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+            self._blank()
+            self._sys("sessions (most recent first)")
+            self._blank()
+            for path in paths:
+                u   = session_token_usage(path)
+                cur = "  ←" if path.stem == self.session.id else ""
+                self._sys(f"  {path.stem:<24}  ${u['cost_usd']:.4f}{cur}")
+            self._log().scroll_end(animate=True)
             return True
 
         if cmd == "/usage":
