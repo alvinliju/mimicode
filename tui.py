@@ -99,6 +99,11 @@ class PromptEditor(TextArea):
             self.editor = editor
             super().__init__()
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Store actual paste content mapped to placeholder text
+        self._paste_content: dict[str, str] = {}
+
     DEFAULT_CSS = f"""
     PromptEditor {{
         height: auto;
@@ -118,19 +123,71 @@ class PromptEditor(TextArea):
     }}
     """
 
+    def on_paste(self, event: events.Paste) -> None:
+        """Handle paste events and show indicator for multi-line pastes."""
+        pasted_text = event.text
+        # Count actual lines (split by newlines)
+        lines = pasted_text.splitlines()
+        line_count = len(lines)
+        
+        if line_count > 1:
+            # Multi-line paste - show indicator instead of pasted content
+            event.prevent_default()
+            placeholder = f"[Pasted {line_count} lines]"
+            # Store the actual content mapped to this placeholder
+            self._paste_content[placeholder] = pasted_text
+            self.insert(placeholder)
+
     def on_key(self, event: events.Key) -> None:
         if event.key == "enter":
             event.prevent_default()
             text = self.text.strip()
             if text:
-                self.post_message(self.Submitted(self, text))
+                # Expand any paste placeholders before submitting
+                expanded_text = self._expand_paste_placeholders(text)
+                self.post_message(self.Submitted(self, expanded_text))
                 self.load_text("")
+                # Clear paste content after submission
+                self._paste_content.clear()
         elif event.key == "shift+enter":
             event.prevent_default()
-            self.insert("\n")
+            # Check if cursor is on a paste placeholder
+            current_line = self.get_cursor_line_text()
+            placeholder_match = None
+            for placeholder in self._paste_content.keys():
+                if placeholder in current_line:
+                    placeholder_match = placeholder
+                    break
+            
+            if placeholder_match:
+                # Expand the placeholder inline
+                expanded = self._paste_content[placeholder_match]
+                # Replace the placeholder with actual content
+                new_text = self.text.replace(placeholder_match, expanded)
+                self.load_text(new_text)
+                # Remove from tracking since it's now expanded
+                del self._paste_content[placeholder_match]
+            else:
+                # Normal newline insertion
+                self.insert("\n")
         elif event.key == "tab":
             event.prevent_default()
             self.post_message(self.TabPressed(self))
+
+    def get_cursor_line_text(self) -> str:
+        """Get the text of the line where cursor is currently positioned."""
+        cursor_row = self.cursor_location[0]
+        lines = self.text.splitlines()
+        if cursor_row < len(lines):
+            return lines[cursor_row]
+        return ""
+    
+    def _expand_paste_placeholders(self, text: str) -> str:
+        """Replace all paste placeholders with their actual content."""
+        expanded = text
+        for placeholder, actual_content in self._paste_content.items():
+            expanded = expanded.replace(placeholder, actual_content)
+        return expanded
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +293,7 @@ class MimicodeApp(App):
         self._interrupted: bool = False
         self._last_tool_name: str = ""
         self._last_tool_args: dict = {}
+        self._last_tool_result: str | None = None
         self._animation_index: int = 0
         self._animation_timer: asyncio.Task | None = None
 
@@ -356,6 +414,7 @@ class MimicodeApp(App):
             args      = data["args"]
             self._last_tool_name = tool_name
             self._last_tool_args = args
+            self._last_tool_result = None
             self._set_activity(tool_name, args)
 
         elif event_type == "tool_exec_result":
@@ -363,6 +422,7 @@ class MimicodeApp(App):
             is_error = data["is_error"]
             args     = dict(self._last_tool_args)
             args["_is_error"] = is_error
+            self._last_tool_result = output
             self._set_activity(self._last_tool_name, args, result=output)
     
     def _render_accumulated_text(self) -> None:
@@ -477,14 +537,14 @@ class MimicodeApp(App):
             (key, _DIM),
         )
         if result is not None:
-            # Stop animation when result is ready
-            self._stop_animation_timer()
+            # Keep animation running even when showing results
             ok    = not (args or {}).get("_is_error")
             icon  = "✓" if ok else "✗"
             color = _OK if ok else _ERR
             preview = result.replace("\n", "  ")[:80] + ("…" if len(result) > 80 else "")
+            anim_result = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
             line2 = Text.assemble(
-                (f" └─ {icon}  ", f"bold {color}"),
+                (f" └─ {anim_result} {icon}  ", f"bold {color}"),
                 (preview, _DIM),
             )
         else:
@@ -504,6 +564,9 @@ class MimicodeApp(App):
 
     def _clear_activity(self) -> None:
         self._stop_animation_timer()
+        self._last_tool_name = ""
+        self._last_tool_args = {}
+        self._last_tool_result = None
         widget = self.query_one("#activity", Static)
         widget.update(Text(""))
         widget.remove_class("active")
@@ -527,7 +590,7 @@ class MimicodeApp(App):
                 self._animation_index += 1
                 # Re-render the activity line with updated animation
                 if self._last_tool_name:
-                    self._set_activity(self._last_tool_name, self._last_tool_args)
+                    self._set_activity(self._last_tool_name, self._last_tool_args, result=self._last_tool_result)
                 else:
                     # Update thinking animation
                     widget = self.query_one("#activity", Static)
