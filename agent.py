@@ -24,6 +24,7 @@ from pathlib import Path
 from logger import log, start_session
 from mimi_memory import auto_update_session, handle_memory_write, init_memory, load_session_context
 from providers import call_claude, call_claude_streaming
+from repomap import build_repo_map
 from tools import bash, edit, read, write
 
 SYSTEM_PROMPT = """You are a coding agent in a minimal harness called mimicode.
@@ -170,10 +171,15 @@ TOOLS = [
 _TOOL_FNS = {"bash": bash, "read": read, "write": write, "edit": edit}
 
 
-def build_system(cwd: str, memory_context: str = "") -> str:
+def build_system(cwd: str, memory_context: str = "", repo_map: str = "") -> str:
     base = f"{SYSTEM_PROMPT}\n\nCurrent date: {date.today().isoformat()}\nCurrent working directory: {cwd}"
+    if repo_map:
+        base += (
+            "\n\n## Repository map (Python symbols by file; not source of truth — read the file before editing)\n"
+            f"{repo_map}"
+        )
     if memory_context:
-        return f"{base}\n\n{memory_context}"
+        base += f"\n\n{memory_context}"
     return base
 
 
@@ -241,7 +247,11 @@ async def agent_turn(
         messages = []
     messages.append({"role": "user", "content": user_msg})
     memory_context = load_session_context(session_id) if session_id else ""
-    system = build_system(cwd, memory_context)
+    # repo-map: built once per session and cached to .mimi/repomap.txt; fast on
+    # repeat turns. stale-during-session is intentional — keeps the prompt
+    # cache warm. agent reads actual files when it needs ground truth.
+    repo_map = build_repo_map(cwd) if cwd else ""
+    system = build_system(cwd, memory_context, repo_map)
 
     def _check_cancel():
         if cancel_event and cancel_event.is_set():
