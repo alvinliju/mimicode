@@ -1,6 +1,8 @@
 #!/bin/bash
 # mimicode installer - Install mimicode globally
-# Usage: curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh | bash
+# Usage: 
+#   curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+#   bash /tmp/mimicode-install.sh
 
 set -e
 
@@ -113,7 +115,8 @@ if [ ! -d "$MIMICODE_HOME" ]; then
     error "mimicode is not installed at $MIMICODE_HOME
     
 Run the installer:
-  curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh | bash"
+  curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+  bash /tmp/mimicode-install.sh"
 fi
 
 # Store the current working directory (where user wants to work)

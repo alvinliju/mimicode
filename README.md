@@ -17,8 +17,14 @@ A minimal coding agent powered by Claude with a focus on deliberate, scoped tool
 Install mimicode globally and run it from anywhere:
 
 ```bash
-# Install mimicode (updates PATH automatically)
-curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh | bash
+# Download the installer
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+
+# Review it (optional but recommended)
+less /tmp/mimicode-install.sh
+
+# Run the installer
+bash /tmp/mimicode-install.sh
 
 # Set your API key (one time)
 export ANTHROPIC_API_KEY="your-key-here"
@@ -145,15 +151,17 @@ python agent.py
 ### Update Global Installation
 
 ```bash
-# Re-run the installer to update to latest version
-curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh | bash
+# Download and run the installer again to update
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+bash /tmp/mimicode-install.sh
 ```
 
 ### Uninstall
 
 ```bash
-# Remove global installation
-curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/uninstall.sh | bash
+# Download and run the uninstaller
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/uninstall.sh -o /tmp/mimicode-uninstall.sh
+bash /tmp/mimicode-uninstall.sh
 ```
 
 ## Architecture

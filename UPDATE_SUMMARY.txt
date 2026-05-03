@@ -1,0 +1,60 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    ✅ DOCUMENTATION UPDATED FOR SAFE INSTALLATION
+═══════════════════════════════════════════════════════════════════════════════
+
+CHANGES MADE:
+
+1. Replaced unsafe pattern throughout all documentation:
+   
+   OLD (Unsafe):
+     Download and pipe directly to bash
+   
+   NEW (Safe):
+     curl -fsSL <URL> -o /tmp/script.sh
+     bash /tmp/script.sh
+   
+   This allows users to review scripts before running them.
+
+2. Updated GitHub username from YOUR_USERNAME to: Nihalsaeed
+
+3. Files Modified:
+   ✓ README.md - Quick Start and Update/Uninstall sections
+   ✓ install.sh - Usage comments and error messages
+   ✓ uninstall.sh - Reinstall instructions
+   ✓ SETUP_GUIDE.md - All installation examples
+   ✓ PUBLISH_CHECKLIST.md - Testing and publication instructions
+
+═══════════════════════════════════════════════════════════════════════════════
+NEW USER INSTALLATION FLOW:
+═══════════════════════════════════════════════════════════════════════════════
+
+Step 1: Download the installer
+  curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+
+Step 2: (Optional) Review the script
+  less /tmp/mimicode-install.sh
+
+Step 3: Run the installer
+  bash /tmp/mimicode-install.sh
+
+Step 4: Set API key
+  export ANTHROPIC_API_KEY="your-key-here"
+
+Step 5: Run from anywhere!
+  cd ~/my-project
+  mimicode
+
+═══════════════════════════════════════════════════════════════════════════════
+READY TO COMMIT:
+═══════════════════════════════════════════════════════════════════════════════
+
+git add README.md install.sh uninstall.sh SETUP_GUIDE.md PUBLISH_CHECKLIST.md
+git commit -m "Update installation docs to use safe download method and Nihalsaeed username"
+git push origin simplifedinstalation
+
+After pushing, test with:
+  curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/simplifedinstalation/install.sh -o /tmp/test-install.sh
+  less /tmp/test-install.sh
+  bash /tmp/test-install.sh
+
+═══════════════════════════════════════════════════════════════════════════════

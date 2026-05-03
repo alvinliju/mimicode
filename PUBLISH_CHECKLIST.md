@@ -61,8 +61,11 @@ git push origin main
 After pushing to GitHub:
 
 ```bash
-# Test installation from GitHub
-curl -fsSL https://raw.githubusercontent.com/$GITHUB_USER/mimicode/main/install.sh | bash
+# Download installer from GitHub
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+
+# Run it
+bash /tmp/mimicode-install.sh
 
 # Verify it works
 cd /tmp
@@ -72,7 +75,8 @@ echo "print('hello')" > test.py
 mimicode --help
 
 # Test uninstall
-curl -fsSL https://raw.githubusercontent.com/$GITHUB_USER/mimicode/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/uninstall.sh -o /tmp/mimicode-uninstall.sh
+bash /tmp/mimicode-uninstall.sh
 ```
 
 ## Step 5: Create GitHub Release (Optional)
@@ -83,11 +87,12 @@ curl -fsSL https://raw.githubusercontent.com/$GITHUB_USER/mimicode/main/uninstal
 4. Release title: "Global Installation Support"
 5. Description:
    ```markdown
-   ## New: One-Command Installation
+   ## New: Easy Global Installation
    
    Install mimicode globally with:
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/$GITHUB_USER/mimicode/main/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+   bash /tmp/mimicode-install.sh
    ```
    
    ## Features
@@ -132,8 +137,11 @@ Before announcing:
 Share the installation command:
 
 ```bash
-# Installation (one command)
-curl -fsSL https://raw.githubusercontent.com/$GITHUB_USER/mimicode/main/install.sh | bash
+# Download installer
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+
+# Run installer
+bash /tmp/mimicode-install.sh
 
 # Set API key
 export ANTHROPIC_API_KEY="your-key"
@@ -158,13 +166,21 @@ If issues are found:
 Expected user questions:
 
 **Q: How do I update?**
-A: Re-run the installer: `curl -fsSL <url>/install.sh | bash`
+A: Download and re-run the installer:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+bash /tmp/mimicode-install.sh
+```
 
 **Q: Where is mimicode installed?**
 A: Repository: `~/.mimicode`, Command: `/usr/local/bin/mimicode` or `~/.local/bin/mimicode`
 
 **Q: How do I uninstall?**
-A: Run: `curl -fsSL <url>/uninstall.sh | bash`
+A: Download and run the uninstaller:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/uninstall.sh -o /tmp/mimicode-uninstall.sh
+bash /tmp/mimicode-uninstall.sh
+```
 
 **Q: Can I use a different installation directory?**
 A: Yes: `MIMICODE_INSTALL_DIR=/custom/path bash install.sh`

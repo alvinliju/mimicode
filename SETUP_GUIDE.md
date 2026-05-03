@@ -13,10 +13,10 @@ Before publishing, replace all instances of `YOUR_USERNAME` with your actual Git
 git clone --quiet https://github.com/YOUR_GITHUB_USERNAME/mimicode.git "$REPO_DIR"
 
 # In install.sh wrapper (line ~89)
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/mimicode/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/mimicode/main/install.sh -o /tmp/install.sh
 
 # In uninstall.sh (line ~59)
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/mimicode/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/mimicode/main/install.sh -o /tmp/install.sh
 
 # In README.md (multiple locations)
 # Replace all YOUR_USERNAME occurrences
@@ -66,15 +66,19 @@ git push origin main
 After pushing to GitHub, test the remote installation:
 
 ```bash
-# Test the curl installation
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/mimicode/main/install.sh | bash
+# Download the installer from GitHub
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+
+# Run it
+bash /tmp/mimicode-install.sh
 
 # Verify it works
 cd /tmp
 mimicode --help
 
 # Clean up
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/mimicode/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/uninstall.sh -o /tmp/mimicode-uninstall.sh
+bash /tmp/mimicode-uninstall.sh
 ```
 
 ## For Users
@@ -123,8 +127,14 @@ Install these once:
 ### Installation
 
 ```bash
-# Install mimicode globally
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/mimicode/main/install.sh | bash
+# Download the installer
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+
+# Review it (optional but recommended)
+less /tmp/mimicode-install.sh
+
+# Run the installer
+bash /tmp/mimicode-install.sh
 
 # Set your API key (add to ~/.bashrc or ~/.zshrc for persistence)
 export ANTHROPIC_API_KEY="your-key-here"
@@ -163,15 +173,17 @@ mimicode
 ### Updating
 
 ```bash
-# Re-run the installer to update
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/mimicode/main/install.sh | bash
+# Download and run the installer again
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh -o /tmp/mimicode-install.sh
+bash /tmp/mimicode-install.sh
 ```
 
 ### Uninstalling
 
 ```bash
-# Remove mimicode
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/mimicode/main/uninstall.sh | bash
+# Download and run the uninstaller
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/uninstall.sh -o /tmp/mimicode-uninstall.sh
+bash /tmp/mimicode-uninstall.sh
 ```
 
 ## Troubleshooting
