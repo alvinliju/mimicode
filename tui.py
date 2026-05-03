@@ -23,84 +23,89 @@ from session_history import add_to_history, get_most_recent, get_all, get_by_ses
 # Color Palettes
 # ---------------------------------------------------------------------------
 
-# Default terminal colors (None palette)
 _PALETTES = {
+    # Uses the terminal's own colours — no overrides
     "none": {
-        "BG": "default",
-        "BG2": "default", 
-        "FG": "default",
-        "DIM": "bright_black",
-        "USER": "bright_blue",
-        "BOT": "bright_cyan",
-        "TOOL": "bright_yellow",
-        "OK": "bright_green",
-        "ERR": "bright_red",
+        "BG":     "default",
+        "BG2":    "default",
+        "FG":     "default",
+        "DIM":    "bright_black",
+        "USER":   "bright_blue",
+        "BOT":    "bright_cyan",
+        "TOOL":   "bright_yellow",
+        "OK":     "bright_green",
+        "ERR":    "bright_red",
         "ACCENT": "blue",
     },
-    "vscode": {
-        "BG": "#1e1e1e",
-        "BG2": "#252526",
-        "FG": "#cccccc",
-        "DIM": "#6a6a6a",
-        "USER": "#569cd6",
-        "BOT": "#4ec9b0",
-        "TOOL": "#dcdcaa",
-        "OK": "#6a9955",
-        "ERR": "#f44747",
-        "ACCENT": "#007acc",
+    # Balanced neutral charcoal — good for any environment
+    "default": {
+        "BG":     "#1c1c1e",
+        "BG2":    "#2c2c2e",
+        "FG":     "#d1d1d6",
+        "DIM":    "#6e6e73",
+        "USER":   "#5ac8fa",
+        "BOT":    "#32d74b",
+        "TOOL":   "#ff9f0a",
+        "OK":     "#32d74b",
+        "ERR":    "#ff453a",
+        "ACCENT": "#0a84ff",
     },
-    "dracula": {
-        "BG": "#282a36",
-        "BG2": "#21222c",
-        "FG": "#f8f8f2",
-        "DIM": "#6272a4",
-        "USER": "#8be9fd",
-        "BOT": "#50fa7b",
-        "TOOL": "#f1fa8c",
-        "OK": "#50fa7b",
-        "ERR": "#ff5555",
-        "ACCENT": "#bd93f9",
+    # Near-black background, soft high-contrast text
+    "dark": {
+        "BG":     "#090909",
+        "BG2":    "#141414",
+        "FG":     "#ebebeb",
+        "DIM":    "#4a4a4a",
+        "USER":   "#c8c8c8",
+        "BOT":    "#8db89a",
+        "TOOL":   "#c8a96e",
+        "OK":     "#5fad6f",
+        "ERR":    "#c85a5a",
+        "ACCENT": "#585858",
     },
-    "monokai": {
-        "BG": "#272822",
-        "BG2": "#1e1f1c",
-        "FG": "#f8f8f2",
-        "DIM": "#75715e",
-        "USER": "#66d9ef",
-        "BOT": "#a6e22e",
-        "TOOL": "#e6db74",
-        "OK": "#a6e22e",
-        "ERR": "#f92672",
-        "ACCENT": "#ae81ff",
+    # White background, warm ink tones
+    "light": {
+        "BG":     "#ffffff",
+        "BG2":    "#f2f2f7",
+        "FG":     "#1c1c1e",
+        "DIM":    "#8e8e93",
+        "USER":   "#0071e3",
+        "BOT":    "#1a8a3a",
+        "TOOL":   "#b25000",
+        "OK":     "#1a8a3a",
+        "ERR":    "#d70015",
+        "ACCENT": "#0071e3",
     },
-    "gruvbox": {
-        "BG": "#282828",
-        "BG2": "#1d2021",
-        "FG": "#ebdbb2",
-        "DIM": "#928374",
-        "USER": "#83a598",
-        "BOT": "#8ec07c",
-        "TOOL": "#fabd2f",
-        "OK": "#b8bb26",
-        "ERR": "#fb4934",
-        "ACCENT": "#fe8019",
+    # Deep ocean: dark navy with cool blue accents
+    "dark_blue": {
+        "BG":     "#0a1628",
+        "BG2":    "#0d1f3c",
+        "FG":     "#cdd6f4",
+        "DIM":    "#4a5270",
+        "USER":   "#89b4fa",
+        "BOT":    "#74c7ec",
+        "TOOL":   "#f9e2af",
+        "OK":     "#a6e3a1",
+        "ERR":    "#f38ba8",
+        "ACCENT": "#89b4fa",
     },
-    "nord": {
-        "BG": "#2e3440",
-        "BG2": "#3b4252",
-        "FG": "#eceff4",
-        "DIM": "#4c566a",
-        "USER": "#88c0d0",
-        "BOT": "#8fbcbb",
-        "TOOL": "#ebcb8b",
-        "OK": "#a3be8c",
-        "ERR": "#bf616a",
-        "ACCENT": "#5e81ac",
+    # Sky and cloud: pale blue-white with deep blue ink
+    "light_blue": {
+        "BG":     "#eef2ff",
+        "BG2":    "#dde6fb",
+        "FG":     "#1e1b4b",
+        "DIM":    "#7c87b0",
+        "USER":   "#3730a3",
+        "BOT":    "#0369a1",
+        "TOOL":   "#6d28d9",
+        "OK":     "#15803d",
+        "ERR":    "#be123c",
+        "ACCENT": "#4f46e5",
     },
 }
 
-# Current active palette (default to vscode)
-_CURRENT_PALETTE = "vscode"
+# Current active palette
+_CURRENT_PALETTE = "default"
 
 def _get_color(key: str) -> str:
     """Get color from current palette."""
@@ -150,7 +155,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/usage",     "token usage — this session"),
     ("/usage all", "token usage — all sessions"),
     ("/cwd",       "change working directory"),
-    ("/palette",   "change color palette (none/vscode/dracula/monokai/gruvbox/nord)"),
+    ("/palette",   "change theme (none/default/dark/light/dark_blue/light_blue)"),
     ("/pmon",      "toggle prompt monitoring (warns on vague prompts)"),
 ]
 
@@ -911,7 +916,7 @@ class MimicodeApp(App):
                 "  /usage             token usage for this session",
                 "  /usage all         token usage across all sessions",
                 "  /cwd [path]        change working directory (no arg = show current)",
-                "  /palette <name>    change color palette (none/vscode/dracula/monokai/gruvbox/nord)",
+                "  /palette <name>    change theme (none/default/dark/light/dark_blue/light_blue)",
                 "  /pmon              toggle prompt monitoring (warns on vague prompts)",
             ]:
                 self._sys(line)
@@ -1122,15 +1127,15 @@ class MimicodeApp(App):
             if len(args) < 2:
                 # Show current palette and available options
                 self._blank()
-                self._sys(f"current palette: {_CURRENT_PALETTE}")
-                self._sys(f"available palettes: {', '.join(_PALETTES.keys())}")
+                self._sys(f"current theme: {_CURRENT_PALETTE}")
+                self._sys(f"available themes: {', '.join(_PALETTES.keys())}")
                 self._log().scroll_end(animate=True)
                 return True
             
             palette_name = args[1].lower()
             if palette_name not in _PALETTES:
-                self._sys(f"error: unknown palette '{palette_name}'")
-                self._sys(f"available palettes: {', '.join(_PALETTES.keys())}")
+                self._sys(f"error: unknown theme '{palette_name}'")
+                self._sys(f"available themes: {', '.join(_PALETTES.keys())}")
                 self._log().scroll_end(animate=True)
                 return True
             
@@ -1141,9 +1146,9 @@ class MimicodeApp(App):
             self.refresh_css()
             
             self._blank()
-            self._sys(f"palette changed from '{old_palette}' to '{palette_name}'")
+            self._sys(f"theme changed: {old_palette} → {palette_name}")
             if palette_name == "none":
-                self._sys("using default terminal colors")
+                self._sys("using terminal's own colours")
             self._log().scroll_end(animate=True)
             log("palette_changed", {"old": old_palette, "new": palette_name, "session_id": self.session.id})
             return True
