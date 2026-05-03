@@ -2,8 +2,11 @@
 import asyncio
 import os
 import sys
+import random
 
 from rich.text import Text
+from rich.markdown import Markdown
+from rich.padding import Padding
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -15,18 +18,121 @@ from logger import log, start_session
 from tools_session import all_sessions_token_usage, session_token_usage
 
 # ---------------------------------------------------------------------------
-# Palette — VS Code Dark+ inspired
+# Color Palettes
 # ---------------------------------------------------------------------------
-_BG     = "#1e1e1e"
-_BG2    = "#252526"
-_FG     = "#cccccc"
-_DIM    = "#6a6a6a"
-_USER   = "#569cd6"
-_BOT    = "#4ec9b0"
-_TOOL   = "#dcdcaa"
-_OK     = "#6a9955"
-_ERR    = "#f44747"
-_ACCENT = "#007acc"
+
+# Default terminal colors (None palette)
+_PALETTES = {
+    "none": {
+        "BG": "default",
+        "BG2": "default", 
+        "FG": "default",
+        "DIM": "bright_black",
+        "USER": "bright_blue",
+        "BOT": "bright_cyan",
+        "TOOL": "bright_yellow",
+        "OK": "bright_green",
+        "ERR": "bright_red",
+        "ACCENT": "blue",
+    },
+    "vscode": {
+        "BG": "#1e1e1e",
+        "BG2": "#252526",
+        "FG": "#cccccc",
+        "DIM": "#6a6a6a",
+        "USER": "#569cd6",
+        "BOT": "#4ec9b0",
+        "TOOL": "#dcdcaa",
+        "OK": "#6a9955",
+        "ERR": "#f44747",
+        "ACCENT": "#007acc",
+    },
+    "dracula": {
+        "BG": "#282a36",
+        "BG2": "#21222c",
+        "FG": "#f8f8f2",
+        "DIM": "#6272a4",
+        "USER": "#8be9fd",
+        "BOT": "#50fa7b",
+        "TOOL": "#f1fa8c",
+        "OK": "#50fa7b",
+        "ERR": "#ff5555",
+        "ACCENT": "#bd93f9",
+    },
+    "monokai": {
+        "BG": "#272822",
+        "BG2": "#1e1f1c",
+        "FG": "#f8f8f2",
+        "DIM": "#75715e",
+        "USER": "#66d9ef",
+        "BOT": "#a6e22e",
+        "TOOL": "#e6db74",
+        "OK": "#a6e22e",
+        "ERR": "#f92672",
+        "ACCENT": "#ae81ff",
+    },
+    "gruvbox": {
+        "BG": "#282828",
+        "BG2": "#1d2021",
+        "FG": "#ebdbb2",
+        "DIM": "#928374",
+        "USER": "#83a598",
+        "BOT": "#8ec07c",
+        "TOOL": "#fabd2f",
+        "OK": "#b8bb26",
+        "ERR": "#fb4934",
+        "ACCENT": "#fe8019",
+    },
+    "nord": {
+        "BG": "#2e3440",
+        "BG2": "#3b4252",
+        "FG": "#eceff4",
+        "DIM": "#4c566a",
+        "USER": "#88c0d0",
+        "BOT": "#8fbcbb",
+        "TOOL": "#ebcb8b",
+        "OK": "#a3be8c",
+        "ERR": "#bf616a",
+        "ACCENT": "#5e81ac",
+    },
+}
+
+# Current active palette (default to vscode)
+_CURRENT_PALETTE = "vscode"
+
+def _get_color(key: str) -> str:
+    """Get color from current palette."""
+    return _PALETTES[_CURRENT_PALETTE][key]
+
+# Color accessors
+_BG     = lambda: _get_color("BG")
+_BG2    = lambda: _get_color("BG2")
+_FG     = lambda: _get_color("FG")
+_DIM    = lambda: _get_color("DIM")
+_USER   = lambda: _get_color("USER")
+_BOT    = lambda: _get_color("BOT")
+_TOOL   = lambda: _get_color("TOOL")
+_OK     = lambda: _get_color("OK")
+_ERR    = lambda: _get_color("ERR")
+_ACCENT = lambda: _get_color("ACCENT")
+
+# ---------------------------------------------------------------------------
+# Tool action synonyms and animation
+# ---------------------------------------------------------------------------
+_ANIMATION_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+_TOOL_SYNONYMS = {
+    "read": ["reading", "scanning", "parsing", "loading", "opening"],
+    "write": ["writing", "creating", "saving", "generating", "composing"],
+    "edit": ["editing", "modifying", "updating", "patching", "revising"],
+    "bash": ["executing", "running", "invoking", "processing", "launching"],
+    "memory_write": ["storing", "recording", "persisting", "archiving", "saving"],
+}
+
+def _get_tool_verb(tool_name: str) -> str:
+    """Get a random synonym verb for the tool action."""
+    synonyms = _TOOL_SYNONYMS.get(tool_name, [f"{tool_name}ing"])
+    return random.choice(synonyms)
 
 # ---------------------------------------------------------------------------
 # Slash command registry
@@ -35,8 +141,14 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help",      "show available commands"),
     ("/clear",     "clear chat history"),
     ("/exit",      "exit the application"),
+    ("/new",       "start a fresh session"),
+    ("/session",   "switch to or create a session"),
+    ("/sessions",  "list all sessions"),
     ("/usage",     "token usage — this session"),
     ("/usage all", "token usage — all sessions"),
+    ("/cwd",       "change working directory"),
+    ("/palette",   "change color palette (none/vscode/dracula/monokai/gruvbox/nord)"),
+    ("/pmon",      "toggle prompt monitoring (warns on vague prompts)"),
 ]
 
 def _completions(prefix: str) -> list[tuple[str, str]]:
@@ -44,12 +156,47 @@ def _completions(prefix: str) -> list[tuple[str, str]]:
     return [(cmd, desc) for cmd, desc in SLASH_COMMANDS if cmd.startswith(p)]
 
 
+def _key_arg(tool_name: str, args: dict) -> str:
+    """Extract the most informative single argument for the activity line."""
+    from pathlib import Path as _P
+    if tool_name in ("read", "write", "edit"):
+        p = args.get("path", "")
+        return _P(p).name if p else ""
+    if tool_name == "bash":
+        cmd = args.get("cmd", "")
+        return (cmd[:60] + "…") if len(cmd) > 60 else cmd
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # PromptEditor
 # ---------------------------------------------------------------------------
 
+def _get_prompt_editor_css() -> str:
+    """Generate PromptEditor CSS with current palette colors."""
+    return f"""
+    PromptEditor {{
+        height: auto;
+        min-height: 3;
+        max-height: 10;
+        background: {_BG()};
+        color: {_FG()};
+        border: none;
+        border-top: solid {_ACCENT()};
+        padding: 0 1;
+    }}
+    PromptEditor:focus {{
+        border-top: solid {_USER()};
+    }}
+    PromptEditor .text-area--cursor-line {{
+        background: {_BG2()};
+    }}
+    """
+
 class PromptEditor(TextArea):
     """Multi-line input. Enter=submit, Shift+Enter=newline, Tab=autocomplete."""
+
+    DEFAULT_CSS = _get_prompt_editor_css()
 
     class Submitted(Message):
         def __init__(self, editor: "PromptEditor", value: str) -> None:
@@ -62,51 +209,88 @@ class PromptEditor(TextArea):
             self.editor = editor
             super().__init__()
 
-    DEFAULT_CSS = f"""
-    PromptEditor {{
-        height: auto;
-        min-height: 3;
-        max-height: 10;
-        background: {_BG};
-        color: {_FG};
-        border: none;
-        border-top: solid {_ACCENT};
-        padding: 0 1;
-    }}
-    PromptEditor:focus {{
-        border-top: solid {_USER};
-    }}
-    PromptEditor .text-area--cursor-line {{
-        background: {_BG2};
-    }}
-    """
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Store actual paste content mapped to placeholder text
+        self._paste_content: dict[str, str] = {}
+
+    def on_paste(self, event: events.Paste) -> None:
+        """Handle paste events and show indicator for multi-line pastes."""
+        pasted_text = event.text
+        # Count actual lines (split by newlines)
+        lines = pasted_text.splitlines()
+        line_count = len(lines)
+        
+        if line_count > 1:
+            # Multi-line paste - show indicator instead of pasted content
+            event.prevent_default()
+            placeholder = f"[Pasted {line_count} lines]"
+            # Store the actual content mapped to this placeholder
+            self._paste_content[placeholder] = pasted_text
+            self.insert(placeholder)
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "enter":
             event.prevent_default()
             text = self.text.strip()
             if text:
-                self.post_message(self.Submitted(self, text))
+                # Expand any paste placeholders before submitting
+                expanded_text = self._expand_paste_placeholders(text)
+                self.post_message(self.Submitted(self, expanded_text))
                 self.load_text("")
+                # Clear paste content after submission
+                self._paste_content.clear()
         elif event.key == "shift+enter":
             event.prevent_default()
-            self.insert("\n")
+            # Check if cursor is on a paste placeholder
+            current_line = self.get_cursor_line_text()
+            placeholder_match = None
+            for placeholder in self._paste_content.keys():
+                if placeholder in current_line:
+                    placeholder_match = placeholder
+                    break
+            
+            if placeholder_match:
+                # Expand the placeholder inline
+                expanded = self._paste_content[placeholder_match]
+                # Replace the placeholder with actual content
+                new_text = self.text.replace(placeholder_match, expanded)
+                self.load_text(new_text)
+                # Remove from tracking since it's now expanded
+                del self._paste_content[placeholder_match]
+            else:
+                # Normal newline insertion
+                self.insert("\n")
         elif event.key == "tab":
             event.prevent_default()
             self.post_message(self.TabPressed(self))
+
+    def get_cursor_line_text(self) -> str:
+        """Get the text of the line where cursor is currently positioned."""
+        cursor_row = self.cursor_location[0]
+        lines = self.text.splitlines()
+        if cursor_row < len(lines):
+            return lines[cursor_row]
+        return ""
+    
+    def _expand_paste_placeholders(self, text: str) -> str:
+        """Replace all paste placeholders with their actual content."""
+        expanded = text
+        for placeholder, actual_content in self._paste_content.items():
+            expanded = expanded.replace(placeholder, actual_content)
+        return expanded
 
 
 # ---------------------------------------------------------------------------
 # AutocompleteBox
 # ---------------------------------------------------------------------------
 
-class AutocompleteBox(Static):
-    """Floating slash-command suggestions shown above the editor."""
-
-    DEFAULT_CSS = f"""
+def _get_autocomplete_css() -> str:
+    """Generate AutocompleteBox CSS with current palette colors."""
+    return f"""
     AutocompleteBox {{
-        background: {_BG2};
-        border: solid {_ACCENT};
+        background: {_BG2()};
+        border: solid {_ACCENT()};
         padding: 0 1;
         height: auto;
         display: none;
@@ -116,6 +300,11 @@ class AutocompleteBox(Static):
     }}
     """
 
+class AutocompleteBox(Static):
+    """Floating slash-command suggestions shown above the editor."""
+
+    DEFAULT_CSS = _get_autocomplete_css()
+
     def show_completions(self, matches: list[tuple[str, str]]) -> None:
         if not matches:
             self.remove_class("visible")
@@ -124,9 +313,9 @@ class AutocompleteBox(Static):
         for i, (cmd, desc) in enumerate(matches):
             indicator = " → " if i == 0 else "   "
             row = Text.assemble(
-                (indicator, f"bold {_USER}"),
-                (f"{cmd:<16}", _FG),
-                (f"  {desc}", _DIM),
+                (indicator, f"bold {_USER()}"),
+                (f"{cmd:<16}", _FG()),
+                (f"  {desc}", _DIM()),
             )
             lines.append_text(row)
             if i < len(matches) - 1:
@@ -142,42 +331,55 @@ class AutocompleteBox(Static):
 # MimicodeApp
 # ---------------------------------------------------------------------------
 
-class MimicodeApp(App):
-    """Mimicode TUI — pi-style layout."""
-
-    CSS = f"""
+def _get_app_css() -> str:
+    """Generate app CSS with current palette colors."""
+    return f"""
     Screen {{
-        background: {_BG};
+        background: {_BG()};
     }}
     #header {{
-        background: {_BG2};
-        color: {_DIM};
+        background: {_BG2()};
+        color: {_DIM()};
         height: 1;
         padding: 0 1;
     }}
     #chat {{
         height: 1fr;
-        background: {_BG};
+        background: {_BG()};
         padding: 0 1;
         scrollbar-size: 0 0;
     }}
-    #thinking {{
-        height: 1;
-        background: {_BG};
+    #activity {{
+        height: 2;
+        background: {_BG()};
         padding: 0 1;
-        color: {_DIM};
         display: none;
     }}
-    #thinking.active {{
+    #activity.active {{
+        display: block;
+    }}
+    #pmon-warning {{
+        background: #3d2e00;
+        color: #f0c060;
+        height: 1;
+        padding: 0 1;
+        display: none;
+    }}
+    #pmon-warning.visible {{
         display: block;
     }}
     #footer-bar {{
-        background: {_BG2};
-        color: {_DIM};
+        background: {_BG2()};
+        color: {_DIM()};
         height: 1;
         padding: 0 1;
     }}
     """
+
+class MimicodeApp(App):
+    """Mimicode TUI — pi-style layout."""
+
+    CSS = _get_app_css()
 
     BINDINGS = [
         Binding("ctrl+d", "quit", "Quit", show=False, priority=True),
@@ -198,15 +400,23 @@ class MimicodeApp(App):
         self._current_text_blocks: dict[int, str] = {}
         self._current_tool_blocks: dict[int, dict] = {}
         self._interrupted: bool = False
+        self._last_tool_name: str = ""
+        self._last_tool_args: dict = {}
+        self._last_tool_result: str | None = None
+        self._animation_index: int = 0
+        self._animation_timer: asyncio.Task | None = None
+        self._pmon_enabled: bool = True
+        self._pmon_warned: bool = False
 
     def compose(self) -> ComposeResult:
         yield Label(
-            f"mimicode  ·  {self.session.id}  ·  shift+enter for newline  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+d quit",
+            f"mimicode  ·  {self.session.id}  ·  {self.cwd}  ·  shift+enter for newline  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+d quit",
             id="header",
         )
         yield RichLog(id="chat", markup=False, highlight=False, wrap=True, auto_scroll=True)
-        yield Label(" ● thinking…", id="thinking")
+        yield Static("", id="activity")
         yield AutocompleteBox(id="autocomplete")
+        yield Static("", id="pmon-warning")
         yield PromptEditor("", id="editor", language=None, show_line_numbers=False)
         yield Label("", id="footer-bar")
 
@@ -246,9 +456,11 @@ class MimicodeApp(App):
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
         self._interrupted = True
+        self._stop_animation_timer()
+        self._pmon_warned = False
+        self._hide_pmon_warning()
         editor  = self.query_one(PromptEditor)
-        thinking = self.query_one("#thinking", Label)
-        thinking.remove_class("active")
+        self._clear_activity()
         self._current_text_blocks.clear()
         self._current_tool_blocks.clear()
         self._blank()
@@ -312,18 +524,20 @@ class MimicodeApp(App):
             }
         
         elif event_type == "tool_exec_start":
-            # Tool is actually executing now - show it with full args
             tool_name = data["name"]
-            args = data["args"]
-            self._tool_call(tool_name, args)
-            self._log().scroll_end(animate=False)
-        
+            args      = data["args"]
+            self._last_tool_name = tool_name
+            self._last_tool_args = args
+            self._last_tool_result = None
+            self._set_activity(tool_name, args)
+
         elif event_type == "tool_exec_result":
-            # Tool execution completed - show result
-            output = data["output"]
+            output   = data["output"]
             is_error = data["is_error"]
-            self._tool_result(output, is_error)
-            self._log().scroll_end(animate=False)
+            args     = dict(self._last_tool_args)
+            args["_is_error"] = is_error
+            self._last_tool_result = output
+            self._set_activity(self._last_tool_name, args, result=output)
     
     def _render_accumulated_text(self) -> None:
         """Render any accumulated text blocks."""
@@ -340,13 +554,17 @@ class MimicodeApp(App):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         text = event.text_area.text
         box  = self.query_one(AutocompleteBox)
-        if text.startswith("/") and not self.is_processing:
-            matches = _completions(text.strip())
-            self._current_completions = matches
-            box.show_completions(matches)
-        else:
+        if self.is_processing or not text.startswith("/"):
             self._current_completions = []
             box.hide()
+            return
+        if text.startswith("/session "):
+            partial = text[len("/session "):]
+            matches = self._session_completions(partial)
+        else:
+            matches = _completions(text.strip())
+        self._current_completions = matches
+        box.show_completions(matches)
 
     def on_prompt_editor_tab_pressed(self, event: PromptEditor.TabPressed) -> None:
         if not self._current_completions:
@@ -373,41 +591,212 @@ class MimicodeApp(App):
         lines = text.splitlines() or [""]
         for i, line in enumerate(lines):
             pfx = "you  " if i == 0 else "     "
-            self._log().write(Text.assemble((pfx, f"bold {_USER}"), (line, _FG)))
+            self._log().write(Text.assemble((pfx, f"bold {_USER()}"), (line, _FG())))
 
     def _bot(self, text: str) -> None:
         if not text.strip():
             return
         self._blank()
-        lines = text.splitlines() or [""]
-        for i, line in enumerate(lines):
-            pfx = " ●   " if i == 0 else "     "
-            self._log().write(Text.assemble((pfx, f"bold {_BOT}"), (line, _FG)))
+        
+        # Write the bot indicator prefix
+        self._log().write(Text.assemble((" ●   ", f"bold {_BOT()}")))
+        
+        # Render markdown content with left padding for alignment
+        md = Markdown(text)
+        padded = Padding(md, (0, 0, 0, 5))  # 5 spaces to align with "     " continuation
+        self._log().write(padded)
 
     def _tool_call(self, name: str, args: dict) -> None:
         parts = "  ".join(f"{k}={str(v)[:50]}" for k, v in (args or {}).items())
         if len(parts) > 90:
             parts = parts[:90] + "…"
         self._log().write(Text.assemble(
-            (" ⚙   ", f"bold {_TOOL}"),
-            (name + "  ", _TOOL),
-            (parts, _DIM),
+            (" ⚙   ", f"bold {_TOOL()}"),
+            (name + "  ", _TOOL()),
+            (parts, _DIM()),
         ))
 
     def _tool_result(self, output: str, is_error: bool) -> None:
         icon  = " ✗   " if is_error else " ✓   "
-        color = _ERR if is_error else _OK
+        color = _ERR() if is_error else _OK()
         preview = output.replace("\n", "  ")[:120]
         if len(output) > 120:
             preview += f"…  ({len(output):,} chars)"
-        self._log().write(Text.assemble((icon, f"bold {color}"), (preview, _DIM)))
+        self._log().write(Text.assemble((icon, f"bold {color}"), (preview, _DIM())))
 
     def _sys(self, text: str) -> None:
-        self._log().write(Text.assemble(("     ", ""), (text, _DIM)))
+        self._log().write(Text.assemble(("     ", ""), (text, _DIM())))
 
     # -----------------------------------------------------------------------
     # Footer
     # -----------------------------------------------------------------------
+
+    def _set_activity(self, tool_name: str | None = None, args: dict | None = None, result: str | None = None) -> None:
+        """Update the live activity widget. tool_name=None means 'thinking'."""
+        widget = self.query_one("#activity", Static)
+        if tool_name is None:
+            # Start animation for "thinking"
+            self._start_animation_timer()
+            widget.update(Text.assemble((" ●  ", f"bold {_BOT()}"), ("thinking…", _DIM())))
+            widget.add_class("active")
+            return
+        
+        key = _key_arg(tool_name, args or {})
+        verb = _get_tool_verb(tool_name)
+        anim_char = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
+        
+        line1 = Text.assemble(
+            (f" {anim_char}  ", f"bold {_TOOL()}"),
+            (f"{verb}  ", _TOOL()),
+            (key, _DIM()),
+        )
+        if result is not None:
+            # Keep animation running even when showing results
+            ok    = not (args or {}).get("_is_error")
+            icon  = "✓" if ok else "✗"
+            color = _OK() if ok else _ERR()
+            preview = result.replace("\n", "  ")[:80] + ("…" if len(result) > 80 else "")
+            anim_result = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
+            line2 = Text.assemble(
+                (f" └─ {anim_result} {icon}  ", f"bold {color}"),
+                (preview, _DIM()),
+            )
+        else:
+            # Start animation for running tool
+            self._start_animation_timer()
+            anim_running = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
+            line2 = Text.assemble(
+                (f" └─ {anim_running}  ", _DIM()), 
+                ("processing…", _DIM())
+            )
+        content = Text()
+        content.append_text(line1)
+        content.append("\n")
+        content.append_text(line2)
+        widget.update(content)
+        widget.add_class("active")
+
+    def _clear_activity(self) -> None:
+        self._stop_animation_timer()
+        self._last_tool_name = ""
+        self._last_tool_args = {}
+        self._last_tool_result = None
+        widget = self.query_one("#activity", Static)
+        widget.update(Text(""))
+        widget.remove_class("active")
+    
+    def _start_animation_timer(self) -> None:
+        """Start the animation timer if not already running."""
+        if self._animation_timer is None or self._animation_timer.done():
+            self._animation_timer = asyncio.create_task(self._animate_activity())
+    
+    def _stop_animation_timer(self) -> None:
+        """Stop the animation timer."""
+        if self._animation_timer and not self._animation_timer.done():
+            self._animation_timer.cancel()
+            self._animation_timer = None
+    
+    async def _animate_activity(self) -> None:
+        """Continuously update the animation characters."""
+        try:
+            while True:
+                await asyncio.sleep(0.1)  # 100ms per frame
+                self._animation_index += 1
+                # Re-render the activity line with updated animation
+                if self._last_tool_name:
+                    self._set_activity(self._last_tool_name, self._last_tool_args, result=self._last_tool_result)
+                else:
+                    # Update thinking animation
+                    widget = self.query_one("#activity", Static)
+                    anim_char = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
+                    widget.update(Text.assemble((f" {anim_char}  ", f"bold {_BOT()}"), ("thinking…", _DIM())))
+        except asyncio.CancelledError:
+            pass
+
+    def refresh_css(self) -> None:
+        """Refresh the CSS to apply new palette colors."""
+        # Rebuild all CSS with new palette colors
+        MimicodeApp.CSS = _get_app_css()
+        PromptEditor.DEFAULT_CSS = _get_prompt_editor_css()
+        AutocompleteBox.DEFAULT_CSS = _get_autocomplete_css()
+        
+        # Reparse the stylesheet
+        try:
+            self.stylesheet.reparse()
+        except:
+            # If reparse doesn't exist, try other methods
+            pass
+        
+        # Trigger a full screen refresh
+        self.refresh(layout=True, repaint=True)
+        
+    def _update_header(self) -> None:
+        self.query_one("#header", Label).update(
+            f"mimicode  ·  {self.session.id}  ·  {self.cwd}  ·  shift+enter for newline"
+            f"  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+d quit"
+        )
+
+    def _session_completions(self, partial: str) -> list[tuple[str, str]]:
+        sessions_dir = self.session.path.parent
+        ids = sorted(
+            (p.stem for p in sessions_dir.glob("*.jsonl")),
+            key=lambda sid: (sessions_dir / f"{sid}.jsonl").stat().st_mtime,
+            reverse=True,
+        )
+        return [
+            (f"/session {sid}", "current" if sid == self.session.id else "resume")
+            for sid in ids if sid.startswith(partial)
+        ]
+
+    # -----------------------------------------------------------------------
+    # Prompt monitoring
+    # -----------------------------------------------------------------------
+
+    _CONTINUATION = {
+        "continue", "go", "ok", "okay", "yes", "yep", "sure", "proceed",
+        "keep", "more", "next", "done", "thanks", "good", "great", "wait",
+        "alright", "fine", "carry", "on",
+    }
+    _VAGUE_REFS = {"it", "this", "that", "those", "them", "stuff", "everything", "something"}
+    _BARE_VERBS = {
+        "fix", "update", "change", "improve", "edit", "refactor", "clean",
+        "optimize", "rewrite", "check", "review", "make", "add", "remove",
+        "delete", "get", "do", "run", "help",
+    }
+
+    def _needs_pmon_warning(self, prompt: str) -> bool:
+        if not self._pmon_enabled:
+            return False
+        prior_replies = sum(1 for m in self.messages if m["role"] == "assistant")
+        if prior_replies >= 2:
+            return False
+        words = prompt.lower().split()
+        if not words:
+            return False
+        if all(w in self._CONTINUATION for w in words):
+            return False
+        if prior_replies == 0:
+            if len(words) < 5:
+                return True
+            if len(words) < 10 and any(w in self._VAGUE_REFS for w in words):
+                return True
+            if len(words) <= 3 and words[0] in self._BARE_VERBS:
+                return True
+        return False
+
+    def _show_pmon_warning(self) -> None:
+        w = self.query_one("#pmon-warning", Static)
+        w.update(
+            " ⚠  Vague prompt — may waste tokens without more detail."
+            "  Edit or press Enter to continue anyway."
+            "  [ /pmon to disable ]"
+        )
+        w.add_class("visible")
+
+    def _hide_pmon_warning(self) -> None:
+        w = self.query_one("#pmon-warning", Static)
+        w.update("")
+        w.remove_class("visible")
 
     def _update_footer(self) -> None:
         try:
@@ -467,11 +856,17 @@ class MimicodeApp(App):
         if cmd == "/help":
             self._blank()
             for line in [
-                "  /help        show this message",
-                "  /clear       clear chat history",
-                "  /exit        exit the application",
-                "  /usage       token usage for this session",
-                "  /usage all   token usage across all sessions",
+                "  /help              show this message",
+                "  /clear             clear chat history",
+                "  /exit              exit the application",
+                "  /new               start a fresh session",
+                "  /session <name>    switch to or create a session",
+                "  /sessions          list all sessions",
+                "  /usage             token usage for this session",
+                "  /usage all         token usage across all sessions",
+                "  /cwd [path]        change working directory (no arg = show current)",
+                "  /palette <name>    change color palette (none/vscode/dracula/monokai/gruvbox/nord)",
+                "  /pmon              toggle prompt monitoring (warns on vague prompts)",
             ]:
                 self._sys(line)
             self._log().scroll_end(animate=True)
@@ -489,6 +884,49 @@ class MimicodeApp(App):
             self._sys("exiting...")
             log("tui_exit", {"session_id": self.session.id, "via": "slash_command"})
             self.exit()
+            return True
+
+        if cmd == "/new":
+            self.session  = start_session()
+            self.messages = []
+            self._log().clear()
+            self._update_header()
+            self._update_footer()
+            self._sys(f"new session · {self.session.id}")
+            self._log().scroll_end(animate=True)
+            return True
+
+        if cmd == "/session":
+            if len(args) < 2:
+                self._sys("usage: /session <name>")
+                self._log().scroll_end(animate=True)
+                return True
+            sid = args[1]
+            self.session  = start_session(sid)
+            self.messages = load_messages(self.session.path)
+            self._log().clear()
+            self._update_header()
+            self._update_footer()
+            if self.messages:
+                self._render_history()
+                n = sum(1 for m in self.messages if m["role"] == "user" and isinstance(m.get("content"), str))
+                self._sys(f"switched to {sid} · {n} prior turns")
+            else:
+                self._sys(f"new session · {sid}")
+            self._log().scroll_end(animate=True)
+            return True
+
+        if cmd == "/sessions":
+            sessions_dir = self.session.path.parent
+            paths = sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+            self._blank()
+            self._sys("sessions (most recent first)")
+            self._blank()
+            for path in paths:
+                u   = session_token_usage(path)
+                cur = "  ←" if path.stem == self.session.id else ""
+                self._sys(f"  {path.stem:<24}  ${u['cost_usd']:.4f}{cur}")
+            self._log().scroll_end(animate=True)
             return True
 
         if cmd == "/usage":
@@ -524,6 +962,79 @@ class MimicodeApp(App):
             self._log().scroll_end(animate=True)
             return True
 
+        if cmd == "/cwd":
+            if len(args) < 2:
+                # Show current working directory
+                self._blank()
+                self._sys(f"current working directory: {self.cwd}")
+                self._log().scroll_end(animate=True)
+                return True
+            
+            # Change to new directory
+            new_path = " ".join(args[1:])  # support paths with spaces
+            try:
+                # Resolve and validate the path
+                resolved = os.path.abspath(os.path.expanduser(new_path))
+                if not os.path.isdir(resolved):
+                    self._sys(f"error: not a directory: {new_path}")
+                    self._log().scroll_end(animate=True)
+                    return True
+                
+                old_cwd = self.cwd
+                self.cwd = resolved
+                os.chdir(self.cwd)  # Also change the process cwd
+                self._update_header()
+                self._blank()
+                self._sys(f"changed working directory")
+                self._sys(f"  from: {old_cwd}")
+                self._sys(f"  to:   {self.cwd}")
+                log("cwd_changed", {"old": old_cwd, "new": self.cwd, "session_id": self.session.id})
+            except (OSError, ValueError) as e:
+                self._sys(f"error changing directory: {e}")
+            self._log().scroll_end(animate=True)
+            return True
+
+        if cmd == "/palette":
+            global _CURRENT_PALETTE
+            if len(args) < 2:
+                # Show current palette and available options
+                self._blank()
+                self._sys(f"current palette: {_CURRENT_PALETTE}")
+                self._sys(f"available palettes: {', '.join(_PALETTES.keys())}")
+                self._log().scroll_end(animate=True)
+                return True
+            
+            palette_name = args[1].lower()
+            if palette_name not in _PALETTES:
+                self._sys(f"error: unknown palette '{palette_name}'")
+                self._sys(f"available palettes: {', '.join(_PALETTES.keys())}")
+                self._log().scroll_end(animate=True)
+                return True
+            
+            old_palette = _CURRENT_PALETTE
+            _CURRENT_PALETTE = palette_name
+            
+            # Force a complete UI refresh by reloading CSS
+            self.refresh_css()
+            
+            self._blank()
+            self._sys(f"palette changed from '{old_palette}' to '{palette_name}'")
+            if palette_name == "none":
+                self._sys("using default terminal colors")
+            self._log().scroll_end(animate=True)
+            log("palette_changed", {"old": old_palette, "new": palette_name, "session_id": self.session.id})
+            return True
+
+        if cmd == "/pmon":
+            self._pmon_enabled = not self._pmon_enabled
+            state = "on" if self._pmon_enabled else "off"
+            self._sys(f"prompt monitoring {state}.")
+            if not self._pmon_enabled:
+                self._hide_pmon_warning()
+                self._pmon_warned = False
+            self._log().scroll_end(animate=True)
+            return True
+
         return False
 
     # -----------------------------------------------------------------------
@@ -546,11 +1057,18 @@ class MimicodeApp(App):
                 self._log().scroll_end(animate=True)
             return
 
+        if not self._pmon_warned and self._needs_pmon_warning(prompt):
+            self._pmon_warned = True
+            self._show_pmon_warning()
+            return
+
+        self._hide_pmon_warning()
+        self._pmon_warned = False
         self._last_prompt = prompt
         self._user(prompt)
         self._log().scroll_end(animate=True)
 
-        self.query_one("#thinking", Label).add_class("active")
+        self._set_activity()
         editor.disabled    = True
         self.is_processing = True
         self._interrupted  = False
@@ -564,8 +1082,7 @@ class MimicodeApp(App):
         )
 
     async def _run_agent(self, prompt: str, messages_snapshot: list) -> None:
-        editor   = self.query_one(PromptEditor)
-        thinking = self.query_one("#thinking", Label)
+        editor = self.query_one(PromptEditor)
         try:
             self.messages = await agent_turn(
                 prompt,
@@ -596,7 +1113,7 @@ class MimicodeApp(App):
         finally:
             self._agent_task = None
             if not self._interrupted:
-                thinking.remove_class("active")
+                self._clear_activity()
                 self._update_footer()
                 self._log().scroll_end(animate=True)
                 editor.disabled    = False
