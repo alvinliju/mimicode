@@ -148,6 +148,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/usage all", "token usage — all sessions"),
     ("/cwd",       "change working directory"),
     ("/palette",   "change color palette (none/vscode/dracula/monokai/gruvbox/nord)"),
+    ("/pmon",      "toggle prompt monitoring (warns on vague prompts)"),
 ]
 
 def _completions(prefix: str) -> list[tuple[str, str]]:
@@ -357,6 +358,16 @@ def _get_app_css() -> str:
     #activity.active {{
         display: block;
     }}
+    #pmon-warning {{
+        background: #3d2e00;
+        color: #f0c060;
+        height: 1;
+        padding: 0 1;
+        display: none;
+    }}
+    #pmon-warning.visible {{
+        display: block;
+    }}
     #footer-bar {{
         background: {_BG2()};
         color: {_DIM()};
@@ -394,6 +405,8 @@ class MimicodeApp(App):
         self._last_tool_result: str | None = None
         self._animation_index: int = 0
         self._animation_timer: asyncio.Task | None = None
+        self._pmon_enabled: bool = True
+        self._pmon_warned: bool = False
 
     def compose(self) -> ComposeResult:
         yield Label(
@@ -403,6 +416,7 @@ class MimicodeApp(App):
         yield RichLog(id="chat", markup=False, highlight=False, wrap=True, auto_scroll=True)
         yield Static("", id="activity")
         yield AutocompleteBox(id="autocomplete")
+        yield Static("", id="pmon-warning")
         yield PromptEditor("", id="editor", language=None, show_line_numbers=False)
         yield Label("", id="footer-bar")
 
@@ -443,6 +457,8 @@ class MimicodeApp(App):
             self._agent_task.cancel()
         self._interrupted = True
         self._stop_animation_timer()
+        self._pmon_warned = False
+        self._hide_pmon_warning()
         editor  = self.query_one(PromptEditor)
         self._clear_activity()
         self._current_text_blocks.clear()
@@ -732,6 +748,56 @@ class MimicodeApp(App):
             for sid in ids if sid.startswith(partial)
         ]
 
+    # -----------------------------------------------------------------------
+    # Prompt monitoring
+    # -----------------------------------------------------------------------
+
+    _CONTINUATION = {
+        "continue", "go", "ok", "okay", "yes", "yep", "sure", "proceed",
+        "keep", "more", "next", "done", "thanks", "good", "great", "wait",
+        "alright", "fine", "carry", "on",
+    }
+    _VAGUE_REFS = {"it", "this", "that", "those", "them", "stuff", "everything", "something"}
+    _BARE_VERBS = {
+        "fix", "update", "change", "improve", "edit", "refactor", "clean",
+        "optimize", "rewrite", "check", "review", "make", "add", "remove",
+        "delete", "get", "do", "run", "help",
+    }
+
+    def _needs_pmon_warning(self, prompt: str) -> bool:
+        if not self._pmon_enabled:
+            return False
+        prior_replies = sum(1 for m in self.messages if m["role"] == "assistant")
+        if prior_replies >= 2:
+            return False
+        words = prompt.lower().split()
+        if not words:
+            return False
+        if all(w in self._CONTINUATION for w in words):
+            return False
+        if prior_replies == 0:
+            if len(words) < 5:
+                return True
+            if len(words) < 10 and any(w in self._VAGUE_REFS for w in words):
+                return True
+            if len(words) <= 3 and words[0] in self._BARE_VERBS:
+                return True
+        return False
+
+    def _show_pmon_warning(self) -> None:
+        w = self.query_one("#pmon-warning", Static)
+        w.update(
+            " ⚠  Vague prompt — may waste tokens without more detail."
+            "  Edit or press Enter to continue anyway."
+            "  [ /pmon to disable ]"
+        )
+        w.add_class("visible")
+
+    def _hide_pmon_warning(self) -> None:
+        w = self.query_one("#pmon-warning", Static)
+        w.update("")
+        w.remove_class("visible")
+
     def _update_footer(self) -> None:
         try:
             u      = session_token_usage(self.session.path)
@@ -800,6 +866,7 @@ class MimicodeApp(App):
                 "  /usage all         token usage across all sessions",
                 "  /cwd [path]        change working directory (no arg = show current)",
                 "  /palette <name>    change color palette (none/vscode/dracula/monokai/gruvbox/nord)",
+                "  /pmon              toggle prompt monitoring (warns on vague prompts)",
             ]:
                 self._sys(line)
             self._log().scroll_end(animate=True)
@@ -958,6 +1025,16 @@ class MimicodeApp(App):
             log("palette_changed", {"old": old_palette, "new": palette_name, "session_id": self.session.id})
             return True
 
+        if cmd == "/pmon":
+            self._pmon_enabled = not self._pmon_enabled
+            state = "on" if self._pmon_enabled else "off"
+            self._sys(f"prompt monitoring {state}.")
+            if not self._pmon_enabled:
+                self._hide_pmon_warning()
+                self._pmon_warned = False
+            self._log().scroll_end(animate=True)
+            return True
+
         return False
 
     # -----------------------------------------------------------------------
@@ -980,6 +1057,13 @@ class MimicodeApp(App):
                 self._log().scroll_end(animate=True)
             return
 
+        if not self._pmon_warned and self._needs_pmon_warning(prompt):
+            self._pmon_warned = True
+            self._show_pmon_warning()
+            return
+
+        self._hide_pmon_warning()
+        self._pmon_warned = False
         self._last_prompt = prompt
         self._user(prompt)
         self._log().scroll_end(animate=True)
