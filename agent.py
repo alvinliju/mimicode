@@ -22,10 +22,13 @@ from datetime import date
 from pathlib import Path
 
 from logger import log, start_session
+from memory_search import format_results as _format_search_results
+from memory_search import search as _memory_search
 from mimi_memory import auto_update_session, handle_memory_write, init_memory, load_session_context
 from providers import call_claude, call_claude_streaming
 from repomap import build_repo_map
-from tools import bash, edit, read, write
+from router import augment_system_prompt, route_turn
+from tools import ToolResult, bash, edit, read, write
 
 SYSTEM_PROMPT = """You are a coding agent in a minimal harness called mimicode.
 You have four tools: read, bash, edit, write. Use them deliberately.
@@ -50,6 +53,17 @@ EDITING RULES:
   `edits=[{old_text, new_text}, ...]` over multiple sequential `edit` calls. Batched edits are
   atomic: all succeed or none apply.
 - `write` only for new files or full rewrites. Never for partial changes.
+
+MEMORY RULES:
+- After a turn that modified files OR made a meaningful decision, call `memory_write` with a one-sentence
+  summary, the touched component name, and a `change_entry` describing what/why. The summary is NOT
+  auto-generated — if you don't write one, the session has none.
+- For purely read-only / exploratory turns that produced no carry-forward insight, skip memory_write.
+- Do not write speculative or vague summaries. If you can't describe the change in one concrete sentence,
+  the change probably wasn't significant enough to persist.
+- When the user asks about something that may have been worked on before in this codebase
+  ("how did we previously...", "have we built...", "where did we decide..."), call `memory_search`
+  before reading source files. It searches past sessions, components, and decisions by keyword.
 
 STYLE:
 - Prefer one targeted tool call over a broad one. Scope searches.
@@ -140,9 +154,17 @@ TOOLS = [
     {
         "name": "memory_write",
         "description": (
-            "Persist what you just did to .mimi/memory so future sessions can load it efficiently. "
-            "Call this after completing a task or making a significant change. "
-            "Use component names like 'tui', 'agent', 'logger', 'tools', etc."
+            "Persist a structured note about what changed this turn so future sessions can pick up where this one left off. "
+            "Call this when you have ANY of: completed a coherent task, modified one or more files, made an architectural decision, "
+            "or surfaced an unresolved issue. The summary you write is the ONLY way the session gains a real summary — there is "
+            "no auto-summarization. If you don't call it, future sessions resume blind. "
+            "Pass:\n"
+            "  - component: short name like 'tui', 'agent', 'logger', 'router', 'tools' (mandatory)\n"
+            "  - summary: ONE sentence describing the current state of that component (mandatory)\n"
+            "  - change_entry: {file, what, why} when files changed this turn\n"
+            "  - open_issues: list of unresolved problems carried forward\n"
+            "  - related_files: files this note covers\n"
+            "Skip only when this turn was purely exploratory (read-only) and produced no insight worth carrying forward."
         ),
         "input_schema": {
             "type": "object",
@@ -166,9 +188,54 @@ TOOLS = [
             "required": ["component", "summary"],
         },
     },
+    {
+        "name": "memory_search",
+        "description": (
+            "Lexical (FTS5) search over past sessions, components, and decisions stored under "
+            ".mimi/memory/ and sessions/. Use this BEFORE reading source files when the user "
+            "asks about prior work in this codebase ('how did we previously...', 'have we built...', "
+            "'where did we decide...'). Returns up to top_k snippets with source IDs. Local only — "
+            "no embeddings, no network. You can read a returned session by calling `read` on "
+            "sessions/<source_id>.messages.json, or a component via .mimi/memory/components/<id>.json.\n"
+            "Query tips: bare keywords are auto-quoted (`router model` matches both words). "
+            "Use double-quotes for an exact phrase: `\"intent based router\"`. Use `kind` to filter "
+            "to one of session/component/decision when you know which you want."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "FTS5 query (keywords or phrases)"},
+                "top_k": {"type": "integer", "description": "max results (default 5)"},
+                "kind": {"type": "string", "description": "optional filter: 'session' | 'component' | 'decision'"},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
-_TOOL_FNS = {"bash": bash, "read": read, "write": write, "edit": edit}
+
+async def memory_search_tool(
+    query: str,
+    top_k: int = 5,
+    kind: str | None = None,
+    cwd: str = ".",
+) -> ToolResult:
+    """Tool wrapper around memory_search.search. Always succeeds; returns
+    a no-match notice rather than an error when nothing is found."""
+    try:
+        results = _memory_search(query=query, top_k=top_k, kind=kind, cwd=cwd)
+    except Exception as e:
+        return ToolResult(output=f"[memory_search] error: {type(e).__name__}: {e}", is_error=True)
+    return ToolResult(output=_format_search_results(results, query))
+
+
+_TOOL_FNS = {
+    "bash": bash,
+    "read": read,
+    "write": write,
+    "edit": edit,
+    "memory_search": memory_search_tool,
+}
 
 
 def build_system(cwd: str, memory_context: str = "", repo_map: str = "") -> str:
@@ -181,6 +248,56 @@ def build_system(cwd: str, memory_context: str = "", repo_map: str = "") -> str:
     if memory_context:
         base += f"\n\n{memory_context}"
     return base
+
+
+def _scan_relevant_memory(cwd: Path) -> dict[str, list[str]]:
+    """Return {kind: [ids]} for components/decisions whose related_files
+    list contains any file that exists in cwd.
+
+    Used to decide whether to nudge the agent toward `memory_search` —
+    we don't load the contents here, only the IDs. Scanning is cheap
+    (small JSON files); cross-session by design so that any past memory
+    referencing a file in the current cwd surfaces, regardless of which
+    session originally wrote it.
+    """
+    out: dict[str, list[str]] = {"component": [], "decision": []}
+    memory_root = cwd / ".mimi" / "memory"
+    if not memory_root.is_dir():
+        return out
+    for kind, sub in (("component", "components"), ("decision", "decisions")):
+        d = memory_root / sub
+        if not d.is_dir():
+            continue
+        for jf in sorted(d.glob("*.json")):
+            try:
+                data = json.loads(jf.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            related = data.get("related_files") or []
+            if any(rf and (cwd / rf).exists() for rf in related):
+                out[kind].append(jf.stem)
+    return out
+
+
+def _format_memory_nudge(ids: dict[str, list[str]]) -> str:
+    """Render the relevance hits as a small system-prompt block. Empty
+    string when nothing matched, so the prompt stays clean for fresh repos
+    and the prompt cache isn't disturbed by a needless preamble."""
+    if not (ids["component"] or ids["decision"]):
+        return ""
+    parts: list[str] = []
+    if ids["component"]:
+        parts.append(f"components: {', '.join(ids['component'])}")
+    if ids["decision"]:
+        parts.append(f"decisions: {', '.join(ids['decision'])}")
+    return (
+        "## Memory likely relevant to this cwd\n"
+        f"Prior {' / '.join(parts)} reference files that exist here. "
+        "If the user asks about prior work, decisions, or *why* a piece of code is the way it is, "
+        "call `memory_search` BEFORE reading source files."
+    )
 
 
 def messages_path(session_path: Path) -> Path:
@@ -239,19 +356,65 @@ async def agent_turn(
     cancel_event: asyncio.Event | None = None,
 ) -> list[dict]:
     """run one user turn to completion. returns extended messages list.
-    Set cancel_event to interrupt mid-turn; raises AgentInterrupted."""
+    Set cancel_event to interrupt mid-turn; raises AgentInterrupted.
+
+    Env-var overrides (used by external benchmark harnesses):
+      MIMICODE_MODEL       force a specific model id; bypasses route_turn.
+      MIMICODE_MAX_STEPS   raise/lower the step budget (default 25). Useful
+                           when running on terminal-bench where a single
+                           task can need 50+ tool calls.
+    """
+    env_max = os.environ.get("MIMICODE_MAX_STEPS")
+    if env_max:
+        try:
+            max_steps = max(1, int(env_max))
+        except ValueError:
+            pass
     log("user_message", {"chars": len(user_msg), "resumed": bool(messages)})
     if session_id:
         init_memory(session_id)
     if messages is None:
         messages = []
     messages.append({"role": "user", "content": user_msg})
-    memory_context = load_session_context(session_id) if session_id else ""
+    memory_context = load_session_context(session_id, cwd) if session_id else ""
+    # cross-session relevance nudge: scan all components/decisions and, if any
+    # of them reference a file that exists in cwd, tell the agent to consider
+    # memory_search before reading source. invisible to the user; cheap; only
+    # adds tokens when there's a real signal.
+    if cwd:
+        relevant_ids = _scan_relevant_memory(Path(cwd))
+        nudge = _format_memory_nudge(relevant_ids)
+        if nudge:
+            log("memory_injected", {
+                "components": relevant_ids["component"],
+                "decisions": relevant_ids["decision"],
+            })
+            memory_context = (memory_context + "\n\n" + nudge) if memory_context else nudge
     # repo-map: built once per session and cached to .mimi/repomap.txt; fast on
     # repeat turns. stale-during-session is intentional — keeps the prompt
     # cache warm. agent reads actual files when it needs ground truth.
     repo_map = build_repo_map(cwd) if cwd else ""
     system = build_system(cwd, memory_context, repo_map)
+
+    # pin model + guidance for the whole turn. mid-turn model flips invalidate
+    # the prompt cache (each model has its own cache namespace) and per-step
+    # guidance changes the cached system prefix — measured ~3x cost penalty.
+    # decide once based on the user's original ask; let the same model see
+    # the turn through.
+    env_model = os.environ.get("MIMICODE_MODEL")
+    if env_model:
+        # external pinning (benchmark harnesses); skip routing entirely.
+        from router import ModelChoice
+        turn_choice = ModelChoice(model=env_model, reason="env_override")
+    else:
+        turn_choice = route_turn(user_msg)
+    step_system = augment_system_prompt(system, turn_choice.guidance)
+    log("model_route", {
+        "step": "turn",
+        "model": turn_choice.model,
+        "reason": turn_choice.reason,
+        "has_guidance": bool(turn_choice.guidance),
+    })
 
     def _check_cancel():
         if cancel_event and cancel_event.is_set():
@@ -262,11 +425,12 @@ async def agent_turn(
 
         if on_stream_event:
             assistant = await call_claude_streaming(
-                messages, system=system, tools=TOOLS,
+                messages, system=step_system, tools=TOOLS,
+                model=turn_choice.model,
                 on_event=on_stream_event, cancel_event=cancel_event,
             )
         else:
-            assistant = await call_claude(messages, system=system, tools=TOOLS)
+            assistant = await call_claude(messages, system=step_system, tools=TOOLS, model=turn_choice.model)
 
         _check_cancel()
 

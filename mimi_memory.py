@@ -174,8 +174,20 @@ def add_session_ref(session_id: str, entry_id: str) -> None:
 # Context loader — called by agent at turn start
 # ---------------------------------------------------------------------------
 
-def load_session_context(session_id: str) -> str:
-    """Return a compact context string to prepend to the system prompt."""
+def _file_exists_in_cwd(rel_path: str, cwd: str) -> bool:
+    """Check if a relative file path exists in cwd. Simple path matching."""
+    if not rel_path or not cwd:
+        return False
+    target = Path(cwd) / rel_path
+    return target.exists()
+
+
+def load_session_context(session_id: str, cwd: str = "") -> str:
+    """Return a compact context string to prepend to the system prompt.
+    
+    If cwd is provided, filters components/decisions to only include those
+    with at least one related_files entry that exists in cwd.
+    """
     meta = load_session_meta(session_id)
     if not meta:
         return ""
@@ -206,6 +218,14 @@ def load_session_context(session_id: str) -> str:
         for ref in refs:
             entry = index.get(ref)
             if entry:
+                # Filter by file relevance if cwd is provided
+                if cwd:
+                    component_data = load_component(ref.replace("-component", ""))
+                    if component_data:
+                        related_files = component_data.get("related_files", [])
+                        # Include only if at least one related file exists in cwd
+                        if related_files and not any(_file_exists_in_cwd(f, cwd) for f in related_files):
+                            continue
                 lines.append(f"  - [{ref}] {entry.get('summary', '')}")
 
     return "\n".join(lines)
@@ -261,25 +281,18 @@ def _extract_touched_files(messages: list[dict]) -> list[str]:
     return list(seen.keys())
 
 
-def _extract_last_assistant_text(messages: list[dict]) -> str:
-    """Return the last assistant plain-text response."""
-    for msg in reversed(messages):
-        if msg.get("role") != "assistant":
-            continue
-        parts = [b.get("text", "") for b in msg.get("content", []) if b.get("type") == "text"]
-        text = " ".join(parts).strip()
-        if text:
-            return text[:200]
-    return ""
-
-
-def _count_turns(messages: list[dict]) -> int:
-    return sum(1 for m in messages if m.get("role") == "user"
-               and isinstance(m.get("content"), str))
-
-
 def auto_update_session(session_id: str, messages: list[dict]) -> None:
-    """Passively update session meta after a turn — always writes last_active."""
+    """Passively update session meta after a turn.
+
+    Only updates two things:
+      - last_active (via update_session_meta defaults)
+      - focus_files (merged from explicit `path` args in tool_use blocks)
+
+    summary, open_issues, and recent_changes are NEVER auto-populated — those
+    are owned exclusively by the memory_write tool. Auto-summarizing from raw
+    assistant text produced misleading mid-sentence truncations that then got
+    locked in forever; this caller-explicit model is correct and honest.
+    """
     if not session_id:
         return
 
@@ -290,13 +303,9 @@ def auto_update_session(session_id: str, messages: list[dict]) -> None:
     existing_files = meta.get("focus_files", [])
     merged_files = list(dict.fromkeys(touched + existing_files))[:20]
 
-    # auto-populate summary from last assistant text when still blank
-    summary = meta.get("summary") or _extract_last_assistant_text(messages)
-
     update_session_meta(
         session_id=session_id,
         focus_files=merged_files,
-        summary=summary or meta.get("summary"),
     )
 
 

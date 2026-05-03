@@ -188,40 +188,11 @@ def test_extract_touched_files_empty_messages():
 
 
 # ---------------------------------------------------------------------------
-# _extract_last_assistant_text
-# ---------------------------------------------------------------------------
-
-def test_extract_last_assistant_text_basic():
-    msgs = _make_messages([], final_text="Fixed the bug in tui.py.")
-    text = mm._extract_last_assistant_text(msgs)
-    assert text == "Fixed the bug in tui.py."
-
-
-def test_extract_last_assistant_text_truncates_at_200():
-    msgs = _make_messages([], final_text="x" * 300)
-    text = mm._extract_last_assistant_text(msgs)
-    assert len(text) == 200
-
-
-def test_extract_last_assistant_text_skips_tool_only_messages():
-    msgs = [
-        {"role": "user", "content": "go"},
-        {"role": "assistant", "content": [
-            {"type": "tool_use", "name": "bash", "input": {"cmd": "ls"}}
-        ]},
-        {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]},
-        {"role": "assistant", "content": [
-            {"type": "text", "text": "All done."}
-        ]},
-    ]
-    assert mm._extract_last_assistant_text(msgs) == "All done."
-
-
-# ---------------------------------------------------------------------------
 # auto_update_session
 # ---------------------------------------------------------------------------
 
-def test_auto_update_session_populates_files_and_summary():
+def test_auto_update_session_populates_focus_files_only():
+    """Summary must NOT be auto-populated — only memory_write may set it."""
     mm.init_memory("s")
     msgs = _make_messages(
         [{"name": "edit", "input": {"path": "tui.py", "old_text": "a", "new_text": "b"}}],
@@ -230,10 +201,12 @@ def test_auto_update_session_populates_files_and_summary():
     mm.auto_update_session("s", msgs)
     meta = mm.load_session_meta("s")
     assert "tui.py" in meta["focus_files"]
-    assert meta["summary"] == "Fixed markup crash."
+    # critical: summary stays empty unless memory_write was called
+    assert meta["summary"] == ""
 
 
 def test_auto_update_session_does_not_overwrite_existing_summary():
+    """If memory_write set a summary, auto_update must not touch it."""
     mm.init_memory("s")
     mm.update_session_meta("s", summary="Manual summary set by agent.")
     msgs = _make_messages([], final_text="Auto text.")

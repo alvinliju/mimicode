@@ -6,7 +6,21 @@ __pycache__/
 *.db
 .DS_Store
 .pytest_cache/
+.ruff_cache/
 .tofix
 .analysis
 .eval
 .mimi
+
+# transient working dirs
+tmp/
+examples/
+
+# benchmark run artifacts (results are big and per-machine)
+bench/runs/
+tbench-runs/
+
+# adapter build outputs
+tbench_adapter/*.egg-info/
+tbench_adapter/build/
+tbench_adapter/dist/

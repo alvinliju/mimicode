@@ -16,6 +16,7 @@ from textual.widgets import Label, RichLog, Static, TextArea
 
 from agent import AgentInterrupted, agent_turn, load_messages, save_messages
 from logger import log, start_session
+from tools_router import analyze_routing, format_routing_stats
 from tools_session import all_sessions_token_usage, session_token_usage
 from session_history import add_to_history, get_most_recent, get_all, get_by_session_id
 
@@ -926,6 +927,7 @@ class MimicodeApp(App):
                 "  /restore [id]      restore last closed session (or specify session id)",
                 "  /usage             token usage for this session",
                 "  /usage all         token usage across all sessions",
+                "  /route             show model routing stats (Haiku vs Sonnet)",
                 "  /cwd [path]        change working directory (no arg = show current)",
                 "  /palette <name>    change theme (none/default/dark/light/dark_blue/light_blue)",
                 "  /pmon              toggle prompt monitoring (warns on vague prompts)",
@@ -1098,6 +1100,18 @@ class MimicodeApp(App):
                 self._sys(f"  cache read    {u['cache_read']:,}")
                 self._sys(f"  cache write   {u['cache_write']:,}")
                 self._sys(f"  est. cost     ${u['cost_usd']:.4f}")
+            self._log().scroll_end(animate=True)
+            return True
+
+        if cmd == "/route":
+            self._blank()
+            stats = analyze_routing(self.session.id)
+            formatted = format_routing_stats(stats)
+            self._sys("model routing — " + self.session.id)
+            self._blank()
+            for line in formatted.split("\n"):
+                if line:
+                    self._sys(line)
             self._log().scroll_end(animate=True)
             return True
 

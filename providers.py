@@ -12,7 +12,8 @@ from anthropic import AsyncAnthropic
 
 from logger import log
 
-DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+# Default to Haiku for speed and cost efficiency
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_MAX_TOKENS = 8192
 _CACHE = {"type": "ephemeral"}
 
@@ -79,6 +80,7 @@ async def call_claude(
     log(
         "model_response",
         {
+            "model": model,
             "stop_reason": resp.stop_reason,
             "tokens_in": resp.usage.input_tokens,
             "tokens_out": resp.usage.output_tokens,
@@ -201,6 +203,7 @@ async def call_claude_streaming(
                 })
 
     log("model_response_streaming", {
+        "model": model,
         "stop_reason": "end_turn",
         **usage_data,
     })
