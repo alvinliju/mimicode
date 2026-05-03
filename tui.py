@@ -17,89 +17,95 @@ from textual.widgets import Label, RichLog, Static, TextArea
 from agent import AgentInterrupted, agent_turn, load_messages, save_messages
 from logger import log, start_session
 from tools_session import all_sessions_token_usage, session_token_usage
+from session_history import add_to_history, get_most_recent, get_all, get_by_session_id
 
 # ---------------------------------------------------------------------------
 # Color Palettes
 # ---------------------------------------------------------------------------
 
-# Default terminal colors (None palette)
 _PALETTES = {
+    # Uses the terminal's own colours — no overrides
     "none": {
-        "BG": "default",
-        "BG2": "default", 
-        "FG": "default",
-        "DIM": "bright_black",
-        "USER": "bright_blue",
-        "BOT": "bright_cyan",
-        "TOOL": "bright_yellow",
-        "OK": "bright_green",
-        "ERR": "bright_red",
+        "BG":     "default",
+        "BG2":    "default",
+        "FG":     "default",
+        "DIM":    "bright_black",
+        "USER":   "bright_blue",
+        "BOT":    "bright_cyan",
+        "TOOL":   "bright_yellow",
+        "OK":     "bright_green",
+        "ERR":    "bright_red",
         "ACCENT": "blue",
     },
-    "vscode": {
-        "BG": "#1e1e1e",
-        "BG2": "#252526",
-        "FG": "#cccccc",
-        "DIM": "#6a6a6a",
-        "USER": "#569cd6",
-        "BOT": "#4ec9b0",
-        "TOOL": "#dcdcaa",
-        "OK": "#6a9955",
-        "ERR": "#f44747",
-        "ACCENT": "#007acc",
+    # Balanced neutral charcoal — good for any environment
+    "default": {
+        "BG":     "#1c1c1e",
+        "BG2":    "#2c2c2e",
+        "FG":     "#d1d1d6",
+        "DIM":    "#6e6e73",
+        "USER":   "#5ac8fa",
+        "BOT":    "#32d74b",
+        "TOOL":   "#ff9f0a",
+        "OK":     "#32d74b",
+        "ERR":    "#ff453a",
+        "ACCENT": "#0a84ff",
     },
-    "dracula": {
-        "BG": "#282a36",
-        "BG2": "#21222c",
-        "FG": "#f8f8f2",
-        "DIM": "#6272a4",
-        "USER": "#8be9fd",
-        "BOT": "#50fa7b",
-        "TOOL": "#f1fa8c",
-        "OK": "#50fa7b",
-        "ERR": "#ff5555",
-        "ACCENT": "#bd93f9",
+    # Near-black background, soft high-contrast text
+    "dark": {
+        "BG":     "#090909",
+        "BG2":    "#141414",
+        "FG":     "#ebebeb",
+        "DIM":    "#4a4a4a",
+        "USER":   "#c8c8c8",
+        "BOT":    "#8db89a",
+        "TOOL":   "#c8a96e",
+        "OK":     "#5fad6f",
+        "ERR":    "#c85a5a",
+        "ACCENT": "#585858",
     },
-    "monokai": {
-        "BG": "#272822",
-        "BG2": "#1e1f1c",
-        "FG": "#f8f8f2",
-        "DIM": "#75715e",
-        "USER": "#66d9ef",
-        "BOT": "#a6e22e",
-        "TOOL": "#e6db74",
-        "OK": "#a6e22e",
-        "ERR": "#f92672",
-        "ACCENT": "#ae81ff",
+    # White background, warm ink tones
+    "light": {
+        "BG":     "#ffffff",
+        "BG2":    "#f2f2f7",
+        "FG":     "#1c1c1e",
+        "DIM":    "#8e8e93",
+        "USER":   "#0071e3",
+        "BOT":    "#1a8a3a",
+        "TOOL":   "#b25000",
+        "OK":     "#1a8a3a",
+        "ERR":    "#d70015",
+        "ACCENT": "#0071e3",
     },
-    "gruvbox": {
-        "BG": "#282828",
-        "BG2": "#1d2021",
-        "FG": "#ebdbb2",
-        "DIM": "#928374",
-        "USER": "#83a598",
-        "BOT": "#8ec07c",
-        "TOOL": "#fabd2f",
-        "OK": "#b8bb26",
-        "ERR": "#fb4934",
-        "ACCENT": "#fe8019",
+    # Deep ocean: dark navy with cool blue accents
+    "dark_blue": {
+        "BG":     "#0a1628",
+        "BG2":    "#0d1f3c",
+        "FG":     "#cdd6f4",
+        "DIM":    "#4a5270",
+        "USER":   "#89b4fa",
+        "BOT":    "#74c7ec",
+        "TOOL":   "#f9e2af",
+        "OK":     "#a6e3a1",
+        "ERR":    "#f38ba8",
+        "ACCENT": "#89b4fa",
     },
-    "nord": {
-        "BG": "#2e3440",
-        "BG2": "#3b4252",
-        "FG": "#eceff4",
-        "DIM": "#4c566a",
-        "USER": "#88c0d0",
-        "BOT": "#8fbcbb",
-        "TOOL": "#ebcb8b",
-        "OK": "#a3be8c",
-        "ERR": "#bf616a",
-        "ACCENT": "#5e81ac",
+    # Sky and cloud: pale blue-white with deep blue ink
+    "light_blue": {
+        "BG":     "#eef2ff",
+        "BG2":    "#dde6fb",
+        "FG":     "#1e1b4b",
+        "DIM":    "#7c87b0",
+        "USER":   "#3730a3",
+        "BOT":    "#0369a1",
+        "TOOL":   "#6d28d9",
+        "OK":     "#15803d",
+        "ERR":    "#be123c",
+        "ACCENT": "#4f46e5",
     },
 }
 
-# Current active palette (default to vscode)
-_CURRENT_PALETTE = "vscode"
+# Current active palette
+_CURRENT_PALETTE = "default"
 
 def _get_color(key: str) -> str:
     """Get color from current palette."""
@@ -145,10 +151,11 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/new",       "start a fresh session"),
     ("/session",   "switch to or create a session"),
     ("/sessions",  "list all sessions"),
+    ("/restore",   "restore last closed session (or /restore <session-id>)"),
     ("/usage",     "token usage — this session"),
     ("/usage all", "token usage — all sessions"),
     ("/cwd",       "change working directory"),
-    ("/palette",   "change color palette (none/vscode/dracula/monokai/gruvbox/nord)"),
+    ("/palette",   "change theme (none/default/dark/light/dark_blue/light_blue)"),
     ("/pmon",      "toggle prompt monitoring (warns on vague prompts)"),
 ]
 
@@ -212,67 +219,91 @@ class PromptEditor(TextArea):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # Store actual paste content mapped to placeholder text
         self._paste_content: dict[str, str] = {}
+        self._history: list[str] = []
+        self._history_index: int = 0
+        self._draft: str = ""
 
-    def on_paste(self, event: events.Paste) -> None:
-        """Handle paste events and show indicator for multi-line pastes."""
+    def _on_paste(self, event: events.Paste) -> None:
+        """Intercept paste before TextArea processes it."""
         pasted_text = event.text
-        # Count actual lines (split by newlines)
         lines = pasted_text.splitlines()
-        line_count = len(lines)
-        
-        if line_count > 1:
-            # Multi-line paste - show indicator instead of pasted content
+
+        if len(lines) > 1:
             event.prevent_default()
-            placeholder = f"[Pasted {line_count} lines]"
-            # Store the actual content mapped to this placeholder
+            event.stop()
+            placeholder = f"[Pasted {len(lines)} lines]"
             self._paste_content[placeholder] = pasted_text
             self.insert(placeholder)
+        else:
+            super()._on_paste(event)
 
-    def on_key(self, event: events.Key) -> None:
+    def _on_key(self, event: events.Key) -> None:
+        """Intercept keys before TextArea's default handling."""
         if event.key == "enter":
             event.prevent_default()
+            event.stop()
             text = self.text.strip()
             if text:
-                # Expand any paste placeholders before submitting
                 expanded_text = self._expand_paste_placeholders(text)
+                self._history.append(text)
+                self._history_index = len(self._history)
+                self._draft = ""
                 self.post_message(self.Submitted(self, expanded_text))
                 self.load_text("")
-                # Clear paste content after submission
                 self._paste_content.clear()
+        elif event.key == "up":
+            if getattr(self.app, "_current_completions", []):
+                event.prevent_default()
+                event.stop()
+                self.app._navigate_completion(-1)
+                return
+            row, _ = self.cursor_location
+            if row == 0 and self._history_index > 0:
+                event.prevent_default()
+                event.stop()
+                if self._history_index == len(self._history):
+                    self._draft = self.text
+                self._history_index -= 1
+                self.load_text(self._history[self._history_index])
+                self.move_cursor(self.document.end)
+        elif event.key == "down":
+            if getattr(self.app, "_current_completions", []):
+                event.prevent_default()
+                event.stop()
+                self.app._navigate_completion(1)
+                return
+            row, _ = self.cursor_location
+            if row == self.document.line_count - 1 and self._history_index < len(self._history):
+                event.prevent_default()
+                event.stop()
+                self._history_index += 1
+                if self._history_index == len(self._history):
+                    self.load_text(self._draft)
+                else:
+                    self.load_text(self._history[self._history_index])
+                self.move_cursor(self.document.end)
         elif event.key == "shift+enter":
             event.prevent_default()
-            # Check if cursor is on a paste placeholder
-            current_line = self.get_cursor_line_text()
-            placeholder_match = None
-            for placeholder in self._paste_content.keys():
-                if placeholder in current_line:
-                    placeholder_match = placeholder
-                    break
-            
-            if placeholder_match:
-                # Expand the placeholder inline
-                expanded = self._paste_content[placeholder_match]
-                # Replace the placeholder with actual content
-                new_text = self.text.replace(placeholder_match, expanded)
-                self.load_text(new_text)
-                # Remove from tracking since it's now expanded
-                del self._paste_content[placeholder_match]
-            else:
-                # Normal newline insertion
-                self.insert("\n")
+            event.stop()
+            self.insert("\n")
         elif event.key == "tab":
             event.prevent_default()
+            event.stop()
             self.post_message(self.TabPressed(self))
-
-    def get_cursor_line_text(self) -> str:
-        """Get the text of the line where cursor is currently positioned."""
-        cursor_row = self.cursor_location[0]
-        lines = self.text.splitlines()
-        if cursor_row < len(lines):
-            return lines[cursor_row]
-        return ""
+        elif event.key == "backspace":
+            row, col = self.cursor_location
+            line_text = self.document.get_line(row)
+            text_before = line_text[:col]
+            for placeholder in list(self._paste_content.keys()):
+                if text_before.endswith(placeholder):
+                    event.prevent_default()
+                    event.stop()
+                    # Select the whole placeholder and delete it as one unit
+                    self.move_cursor((row, col - len(placeholder)), select=True)
+                    self.insert("")
+                    del self._paste_content[placeholder]
+                    return
     
     def _expand_paste_placeholders(self, text: str) -> str:
         """Replace all paste placeholders with their actual content."""
@@ -306,16 +337,16 @@ class AutocompleteBox(Static):
 
     DEFAULT_CSS = _get_autocomplete_css()
 
-    def show_completions(self, matches: list[tuple[str, str]]) -> None:
+    def show_completions(self, matches: list[tuple[str, str]], selected: int = 0) -> None:
         if not matches:
             self.remove_class("visible")
             return
         lines = Text()
         for i, (cmd, desc) in enumerate(matches):
-            indicator = " → " if i == 0 else "   "
+            indicator = " → " if i == selected else "   "
             row = Text.assemble(
                 (indicator, f"bold {_USER()}"),
-                (f"{cmd:<16}", _FG()),
+                (f"{cmd:<20}", _FG() if i != selected else f"bold {_USER()}"),
                 (f"  {desc}", _DIM()),
             )
             lines.append_text(row)
@@ -398,6 +429,7 @@ class MimicodeApp(App):
         self._cancel_event: asyncio.Event = asyncio.Event()
         self._agent_task: asyncio.Task | None = None
         self._current_completions: list[tuple[str, str]] = []
+        self._autocomplete_selected: int = 0
         self._current_text_blocks: dict[int, str] = {}
         self._current_tool_blocks: dict[int, dict] = {}
         self._interrupted: bool = False
@@ -408,6 +440,8 @@ class MimicodeApp(App):
         self._animation_timer: asyncio.Task | None = None
         self._pmon_enabled: bool = True
         self._pmon_warned: bool = False
+        self._task_start_time: float | None = None
+        self._tools_used_this_turn: bool = False
 
     def compose(self) -> ComposeResult:
         yield Label(
@@ -527,6 +561,7 @@ class MimicodeApp(App):
         elif event_type == "tool_exec_start":
             tool_name = data["name"]
             args      = data["args"]
+            self._tools_used_this_turn = True
             self._last_tool_name = tool_name
             self._last_tool_args = args
             self._last_tool_result = None
@@ -557,29 +592,54 @@ class MimicodeApp(App):
         box  = self.query_one(AutocompleteBox)
         if self.is_processing or not text.startswith("/"):
             self._current_completions = []
+            self._autocomplete_selected = 0
             box.hide()
             return
         if text.startswith("/session "):
             partial = text[len("/session "):]
             matches = self._session_completions(partial)
+        elif text.startswith("/palette "):
+            partial = text[len("/palette "):].strip()
+            matches = [
+                (f"/palette {name}", "current" if name == _CURRENT_PALETTE else "")
+                for name in _PALETTES
+                if name.startswith(partial)
+            ]
         else:
             matches = _completions(text.strip())
+        if matches != self._current_completions:
+            self._autocomplete_selected = 0
         self._current_completions = matches
-        box.show_completions(matches)
+        box.show_completions(matches, self._autocomplete_selected)
+
+    def _navigate_completion(self, direction: int) -> None:
+        if not self._current_completions:
+            return
+        self._autocomplete_selected = (self._autocomplete_selected + direction) % len(self._current_completions)
+        self.query_one(AutocompleteBox).show_completions(self._current_completions, self._autocomplete_selected)
 
     def on_prompt_editor_tab_pressed(self, event: PromptEditor.TabPressed) -> None:
         if not self._current_completions:
             return
-        top_cmd = self._current_completions[0][0]
+        selected_cmd = self._current_completions[self._autocomplete_selected][0]
         editor  = self.query_one(PromptEditor)
-        editor.load_text(top_cmd)
+        editor.load_text(selected_cmd)
         editor.move_cursor(editor.document.end)
         self._current_completions = []
+        self._autocomplete_selected = 0
         self.query_one(AutocompleteBox).hide()
 
     # -----------------------------------------------------------------------
     # Chat write helpers — all use rich.text.Text, never raw markup strings
     # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        s = int(seconds)
+        if s < 60:
+            return f"{s}s"
+        m, s = divmod(s, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
 
     def _log(self) -> RichLog:
         return self.query_one("#chat", RichLog)
@@ -863,10 +923,11 @@ class MimicodeApp(App):
                 "  /new               start a fresh session",
                 "  /session <name>    switch to or create a session",
                 "  /sessions          list all sessions",
+                "  /restore [id]      restore last closed session (or specify session id)",
                 "  /usage             token usage for this session",
                 "  /usage all         token usage across all sessions",
                 "  /cwd [path]        change working directory (no arg = show current)",
-                "  /palette <name>    change color palette (none/vscode/dracula/monokai/gruvbox/nord)",
+                "  /palette <name>    change theme (none/default/dark/light/dark_blue/light_blue)",
                 "  /pmon              toggle prompt monitoring (warns on vague prompts)",
             ]:
                 self._sys(line)
@@ -884,10 +945,16 @@ class MimicodeApp(App):
         if cmd == "/exit":
             self._sys("exiting...")
             log("tui_exit", {"session_id": self.session.id, "via": "slash_command"})
+            # Track session closure in history
+            add_to_history(self.session.id)
             self.exit()
             return True
 
         if cmd == "/new":
+            # Track current session closure before switching
+            old_session_id = self.session.id
+            add_to_history(old_session_id)
+            
             self.session  = start_session()
             self.messages = []
             self._log().clear()
@@ -903,6 +970,12 @@ class MimicodeApp(App):
                 self._log().scroll_end(animate=True)
                 return True
             sid = args[1]
+            
+            # Track current session closure before switching (only if different)
+            if sid != self.session.id:
+                old_session_id = self.session.id
+                add_to_history(old_session_id)
+            
             self.session  = start_session(sid)
             self.messages = load_messages(self.session.path)
             self._log().clear()
@@ -927,6 +1000,71 @@ class MimicodeApp(App):
                 u   = session_token_usage(path)
                 cur = "  ←" if path.stem == self.session.id else ""
                 self._sys(f"  {path.stem:<24}  ${u['cost_usd']:.4f}{cur}")
+            self._log().scroll_end(animate=True)
+            return True
+
+        if cmd == "/restore":
+            history = get_all()
+            
+            if not history:
+                self._blank()
+                self._sys("no session history available")
+                self._log().scroll_end(animate=True)
+                return True
+            
+            # If a specific session ID is provided
+            if len(args) >= 2:
+                target_id = args[1]
+                entry = get_by_session_id(target_id)
+                
+                if not entry:
+                    self._blank()
+                    self._sys(f"session '{target_id}' not found in recent history")
+                    self._sys("available sessions:")
+                    self._blank()
+                    for i, hist_entry in enumerate(history, 1):
+                        self._sys(f"  {i}. {hist_entry['session_id']:<24}  closed: {hist_entry['closed_at_str']}")
+                    self._log().scroll_end(animate=True)
+                    return True
+                
+                session_id_to_restore = entry["session_id"]
+            else:
+                # Restore the most recent session
+                entry = get_most_recent()
+                if not entry:
+                    self._blank()
+                    self._sys("no session history available")
+                    self._log().scroll_end(animate=True)
+                    return True
+                session_id_to_restore = entry["session_id"]
+            
+            # Check if the session file still exists
+            sessions_dir = self.session.path.parent
+            session_path = sessions_dir / f"{session_id_to_restore}.jsonl"
+            
+            if not session_path.exists():
+                self._blank()
+                self._sys(f"session '{session_id_to_restore}' no longer exists")
+                self._log().scroll_end(animate=True)
+                return True
+            
+            # Switch to the restored session
+            self.session  = start_session(session_id_to_restore)
+            self.messages = load_messages(self.session.path)
+            self._log().clear()
+            self._update_header()
+            self._update_footer()
+            
+            if self.messages:
+                self._render_history()
+                n = sum(1 for m in self.messages if m["role"] == "user" and isinstance(m.get("content"), str))
+                self._blank()
+                self._sys(f"restored session · {session_id_to_restore}")
+                self._sys(f"  {n} prior turns · closed: {entry['closed_at_str']}")
+            else:
+                self._blank()
+                self._sys(f"restored session · {session_id_to_restore}")
+            
             self._log().scroll_end(animate=True)
             return True
 
@@ -1000,15 +1138,15 @@ class MimicodeApp(App):
             if len(args) < 2:
                 # Show current palette and available options
                 self._blank()
-                self._sys(f"current palette: {_CURRENT_PALETTE}")
-                self._sys(f"available palettes: {', '.join(_PALETTES.keys())}")
+                self._sys(f"current theme: {_CURRENT_PALETTE}")
+                self._sys(f"available themes: {', '.join(_PALETTES.keys())}")
                 self._log().scroll_end(animate=True)
                 return True
             
             palette_name = args[1].lower()
             if palette_name not in _PALETTES:
-                self._sys(f"error: unknown palette '{palette_name}'")
-                self._sys(f"available palettes: {', '.join(_PALETTES.keys())}")
+                self._sys(f"error: unknown theme '{palette_name}'")
+                self._sys(f"available themes: {', '.join(_PALETTES.keys())}")
                 self._log().scroll_end(animate=True)
                 return True
             
@@ -1019,9 +1157,9 @@ class MimicodeApp(App):
             self.refresh_css()
             
             self._blank()
-            self._sys(f"palette changed from '{old_palette}' to '{palette_name}'")
+            self._sys(f"theme changed: {old_palette} → {palette_name}")
             if palette_name == "none":
-                self._sys("using default terminal colors")
+                self._sys("using terminal's own colours")
             self._log().scroll_end(animate=True)
             log("palette_changed", {"old": old_palette, "new": palette_name, "session_id": self.session.id})
             return True
@@ -1076,6 +1214,8 @@ class MimicodeApp(App):
         self._cancel_event.clear()
         self._current_text_blocks.clear()
         self._current_tool_blocks.clear()
+        self._task_start_time = asyncio.get_event_loop().time()
+        self._tools_used_this_turn = False
 
         messages_snapshot  = list(self.messages)
         self._agent_task   = asyncio.create_task(
@@ -1115,6 +1255,9 @@ class MimicodeApp(App):
             self._agent_task = None
             if not self._interrupted:
                 self._clear_activity()
+                if self._tools_used_this_turn and self._task_start_time is not None:
+                    elapsed = asyncio.get_event_loop().time() - self._task_start_time
+                    self._sys(f"worked for {self._format_duration(elapsed)}")
                 self._update_footer()
                 self._log().scroll_end(animate=True)
                 editor.disabled    = False
