@@ -18,7 +18,7 @@ Install mimicode globally and run it from anywhere:
 
 ```bash
 # Install mimicode (updates PATH automatically)
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/mimicode/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh | bash
 
 # Set your API key (one time)
 export ANTHROPIC_API_KEY="your-key-here"
@@ -39,7 +39,7 @@ The installer will:
 Clone and run mimicode locally:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/mimicode.git
+git clone https://github.com/Nihalsaeed/mimicode.git
 cd mimicode
 ./mimicode
 ```
@@ -146,14 +146,14 @@ python agent.py
 
 ```bash
 # Re-run the installer to update to latest version
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/mimicode/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh | bash
 ```
 
 ### Uninstall
 
 ```bash
 # Remove global installation
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/mimicode/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/uninstall.sh | bash
 ```
 
 ## Architecture

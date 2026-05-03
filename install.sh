@@ -1,6 +1,6 @@
 #!/bin/bash
 # mimicode installer - Install mimicode globally
-# Usage: curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/mimicode/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh | bash
 
 set -e
 
@@ -79,7 +79,7 @@ if [ -d "$REPO_DIR" ]; then
 else
     info "Cloning mimicode to $REPO_DIR..."
     # Update this URL to your actual GitHub repository
-    git clone --quiet https://github.com/YOUR_USERNAME/mimicode.git "$REPO_DIR" || \
+    git clone --quiet https://github.com/Nihalsaeed/mimicode.git "$REPO_DIR" || \
         error "Failed to clone repository. Please check the repository URL."
 fi
 
@@ -113,7 +113,7 @@ if [ ! -d "$MIMICODE_HOME" ]; then
     error "mimicode is not installed at $MIMICODE_HOME
     
 Run the installer:
-  curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/mimicode/main/install.sh | bash"
+  curl -fsSL https://raw.githubusercontent.com/Nihalsaeed/mimicode/main/install.sh | bash"
 fi
 
 # Store the current working directory (where user wants to work)
