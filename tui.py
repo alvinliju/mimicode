@@ -214,8 +214,10 @@ class PromptEditor(TextArea):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # Store actual paste content mapped to placeholder text
         self._paste_content: dict[str, str] = {}
+        self._history: list[str] = []
+        self._history_index: int = 0
+        self._draft: str = ""
 
     def _on_paste(self, event: events.Paste) -> None:
         """Intercept paste before TextArea processes it."""
@@ -239,9 +241,33 @@ class PromptEditor(TextArea):
             text = self.text.strip()
             if text:
                 expanded_text = self._expand_paste_placeholders(text)
+                self._history.append(text)
+                self._history_index = len(self._history)
+                self._draft = ""
                 self.post_message(self.Submitted(self, expanded_text))
                 self.load_text("")
                 self._paste_content.clear()
+        elif event.key == "up":
+            row, _ = self.cursor_location
+            if row == 0 and self._history_index > 0:
+                event.prevent_default()
+                event.stop()
+                if self._history_index == len(self._history):
+                    self._draft = self.text
+                self._history_index -= 1
+                self.load_text(self._history[self._history_index])
+                self.move_cursor(self.document.end)
+        elif event.key == "down":
+            row, _ = self.cursor_location
+            if row == self.document.line_count - 1 and self._history_index < len(self._history):
+                event.prevent_default()
+                event.stop()
+                self._history_index += 1
+                if self._history_index == len(self._history):
+                    self.load_text(self._draft)
+                else:
+                    self.load_text(self._history[self._history_index])
+                self.move_cursor(self.document.end)
         elif event.key == "shift+enter":
             event.prevent_default()
             event.stop()
