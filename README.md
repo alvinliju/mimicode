@@ -25,6 +25,9 @@ set ANTHROPIC_API_KEY=your-key-here       # Windows
 ## Usage
 
 ```bash
+# tui mode
+python agent.py --tui
+
 # One-shot prompt
 python agent.py "your prompt"
 
