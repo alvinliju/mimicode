@@ -248,6 +248,11 @@ class PromptEditor(TextArea):
                 self.load_text("")
                 self._paste_content.clear()
         elif event.key == "up":
+            if getattr(self.app, "_current_completions", []):
+                event.prevent_default()
+                event.stop()
+                self.app._navigate_completion(-1)
+                return
             row, _ = self.cursor_location
             if row == 0 and self._history_index > 0:
                 event.prevent_default()
@@ -258,6 +263,11 @@ class PromptEditor(TextArea):
                 self.load_text(self._history[self._history_index])
                 self.move_cursor(self.document.end)
         elif event.key == "down":
+            if getattr(self.app, "_current_completions", []):
+                event.prevent_default()
+                event.stop()
+                self.app._navigate_completion(1)
+                return
             row, _ = self.cursor_location
             if row == self.document.line_count - 1 and self._history_index < len(self._history):
                 event.prevent_default()
@@ -322,16 +332,16 @@ class AutocompleteBox(Static):
 
     DEFAULT_CSS = _get_autocomplete_css()
 
-    def show_completions(self, matches: list[tuple[str, str]]) -> None:
+    def show_completions(self, matches: list[tuple[str, str]], selected: int = 0) -> None:
         if not matches:
             self.remove_class("visible")
             return
         lines = Text()
         for i, (cmd, desc) in enumerate(matches):
-            indicator = " → " if i == 0 else "   "
+            indicator = " → " if i == selected else "   "
             row = Text.assemble(
                 (indicator, f"bold {_USER()}"),
-                (f"{cmd:<16}", _FG()),
+                (f"{cmd:<20}", _FG() if i != selected else f"bold {_USER()}"),
                 (f"  {desc}", _DIM()),
             )
             lines.append_text(row)
@@ -414,6 +424,7 @@ class MimicodeApp(App):
         self._cancel_event: asyncio.Event = asyncio.Event()
         self._agent_task: asyncio.Task | None = None
         self._current_completions: list[tuple[str, str]] = []
+        self._autocomplete_selected: int = 0
         self._current_text_blocks: dict[int, str] = {}
         self._current_tool_blocks: dict[int, dict] = {}
         self._interrupted: bool = False
@@ -573,24 +584,41 @@ class MimicodeApp(App):
         box  = self.query_one(AutocompleteBox)
         if self.is_processing or not text.startswith("/"):
             self._current_completions = []
+            self._autocomplete_selected = 0
             box.hide()
             return
         if text.startswith("/session "):
             partial = text[len("/session "):]
             matches = self._session_completions(partial)
+        elif text.startswith("/palette "):
+            partial = text[len("/palette "):].strip()
+            matches = [
+                (f"/palette {name}", "current" if name == _CURRENT_PALETTE else "")
+                for name in _PALETTES
+                if name.startswith(partial)
+            ]
         else:
             matches = _completions(text.strip())
+        if matches != self._current_completions:
+            self._autocomplete_selected = 0
         self._current_completions = matches
-        box.show_completions(matches)
+        box.show_completions(matches, self._autocomplete_selected)
+
+    def _navigate_completion(self, direction: int) -> None:
+        if not self._current_completions:
+            return
+        self._autocomplete_selected = (self._autocomplete_selected + direction) % len(self._current_completions)
+        self.query_one(AutocompleteBox).show_completions(self._current_completions, self._autocomplete_selected)
 
     def on_prompt_editor_tab_pressed(self, event: PromptEditor.TabPressed) -> None:
         if not self._current_completions:
             return
-        top_cmd = self._current_completions[0][0]
+        selected_cmd = self._current_completions[self._autocomplete_selected][0]
         editor  = self.query_one(PromptEditor)
-        editor.load_text(top_cmd)
+        editor.load_text(selected_cmd)
         editor.move_cursor(editor.document.end)
         self._current_completions = []
+        self._autocomplete_selected = 0
         self.query_one(AutocompleteBox).hide()
 
     # -----------------------------------------------------------------------
