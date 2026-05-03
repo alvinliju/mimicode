@@ -17,6 +17,7 @@ from textual.widgets import Label, RichLog, Static, TextArea
 from agent import AgentInterrupted, agent_turn, load_messages, save_messages
 from logger import log, start_session
 from tools_session import all_sessions_token_usage, session_token_usage
+from session_history import add_to_history, get_most_recent, get_all, get_by_session_id
 
 # ---------------------------------------------------------------------------
 # Color Palettes
@@ -145,6 +146,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/new",       "start a fresh session"),
     ("/session",   "switch to or create a session"),
     ("/sessions",  "list all sessions"),
+    ("/restore",   "restore last closed session (or /restore <session-id>)"),
     ("/usage",     "token usage — this session"),
     ("/usage all", "token usage — all sessions"),
     ("/cwd",       "change working directory"),
@@ -242,37 +244,12 @@ class PromptEditor(TextArea):
                 # Clear paste content after submission
                 self._paste_content.clear()
         elif event.key == "shift+enter":
+            # Shift+Enter always inserts a newline for multiline editing
             event.prevent_default()
-            # Check if cursor is on a paste placeholder
-            current_line = self.get_cursor_line_text()
-            placeholder_match = None
-            for placeholder in self._paste_content.keys():
-                if placeholder in current_line:
-                    placeholder_match = placeholder
-                    break
-            
-            if placeholder_match:
-                # Expand the placeholder inline
-                expanded = self._paste_content[placeholder_match]
-                # Replace the placeholder with actual content
-                new_text = self.text.replace(placeholder_match, expanded)
-                self.load_text(new_text)
-                # Remove from tracking since it's now expanded
-                del self._paste_content[placeholder_match]
-            else:
-                # Normal newline insertion
-                self.insert("\n")
+            self.insert("\n")
         elif event.key == "tab":
             event.prevent_default()
             self.post_message(self.TabPressed(self))
-
-    def get_cursor_line_text(self) -> str:
-        """Get the text of the line where cursor is currently positioned."""
-        cursor_row = self.cursor_location[0]
-        lines = self.text.splitlines()
-        if cursor_row < len(lines):
-            return lines[cursor_row]
-        return ""
     
     def _expand_paste_placeholders(self, text: str) -> str:
         """Replace all paste placeholders with their actual content."""
@@ -863,6 +840,7 @@ class MimicodeApp(App):
                 "  /new               start a fresh session",
                 "  /session <name>    switch to or create a session",
                 "  /sessions          list all sessions",
+                "  /restore [id]      restore last closed session (or specify session id)",
                 "  /usage             token usage for this session",
                 "  /usage all         token usage across all sessions",
                 "  /cwd [path]        change working directory (no arg = show current)",
@@ -884,10 +862,16 @@ class MimicodeApp(App):
         if cmd == "/exit":
             self._sys("exiting...")
             log("tui_exit", {"session_id": self.session.id, "via": "slash_command"})
+            # Track session closure in history
+            add_to_history(self.session.id)
             self.exit()
             return True
 
         if cmd == "/new":
+            # Track current session closure before switching
+            old_session_id = self.session.id
+            add_to_history(old_session_id)
+            
             self.session  = start_session()
             self.messages = []
             self._log().clear()
@@ -903,6 +887,12 @@ class MimicodeApp(App):
                 self._log().scroll_end(animate=True)
                 return True
             sid = args[1]
+            
+            # Track current session closure before switching (only if different)
+            if sid != self.session.id:
+                old_session_id = self.session.id
+                add_to_history(old_session_id)
+            
             self.session  = start_session(sid)
             self.messages = load_messages(self.session.path)
             self._log().clear()
@@ -927,6 +917,71 @@ class MimicodeApp(App):
                 u   = session_token_usage(path)
                 cur = "  ←" if path.stem == self.session.id else ""
                 self._sys(f"  {path.stem:<24}  ${u['cost_usd']:.4f}{cur}")
+            self._log().scroll_end(animate=True)
+            return True
+
+        if cmd == "/restore":
+            history = get_all()
+            
+            if not history:
+                self._blank()
+                self._sys("no session history available")
+                self._log().scroll_end(animate=True)
+                return True
+            
+            # If a specific session ID is provided
+            if len(args) >= 2:
+                target_id = args[1]
+                entry = get_by_session_id(target_id)
+                
+                if not entry:
+                    self._blank()
+                    self._sys(f"session '{target_id}' not found in recent history")
+                    self._sys("available sessions:")
+                    self._blank()
+                    for i, hist_entry in enumerate(history, 1):
+                        self._sys(f"  {i}. {hist_entry['session_id']:<24}  closed: {hist_entry['closed_at_str']}")
+                    self._log().scroll_end(animate=True)
+                    return True
+                
+                session_id_to_restore = entry["session_id"]
+            else:
+                # Restore the most recent session
+                entry = get_most_recent()
+                if not entry:
+                    self._blank()
+                    self._sys("no session history available")
+                    self._log().scroll_end(animate=True)
+                    return True
+                session_id_to_restore = entry["session_id"]
+            
+            # Check if the session file still exists
+            sessions_dir = self.session.path.parent
+            session_path = sessions_dir / f"{session_id_to_restore}.jsonl"
+            
+            if not session_path.exists():
+                self._blank()
+                self._sys(f"session '{session_id_to_restore}' no longer exists")
+                self._log().scroll_end(animate=True)
+                return True
+            
+            # Switch to the restored session
+            self.session  = start_session(session_id_to_restore)
+            self.messages = load_messages(self.session.path)
+            self._log().clear()
+            self._update_header()
+            self._update_footer()
+            
+            if self.messages:
+                self._render_history()
+                n = sum(1 for m in self.messages if m["role"] == "user" and isinstance(m.get("content"), str))
+                self._blank()
+                self._sys(f"restored session · {session_id_to_restore}")
+                self._sys(f"  {n} prior turns · closed: {entry['closed_at_str']}")
+            else:
+                self._blank()
+                self._sys(f"restored session · {session_id_to_restore}")
+            
             self._log().scroll_end(animate=True)
             return True
 
