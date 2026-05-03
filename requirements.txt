@@ -1,7 +1,13 @@
+# Python dependencies
 anthropic>=0.40
 pytest>=8.0
 textual>=0.47.0
+rich>=13.0
 
 # memory
 fastembed>=0.4
 sqlite-vec>=0.1.6
+
+# Note: ripgrep (rg) is also required but must be installed separately
+# as it's a system binary, not a Python package.
+# See README.md for installation instructions or run: python3 check_deps.py

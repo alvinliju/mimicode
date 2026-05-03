@@ -1,6 +1,7 @@
 """TUI for mimicode — pi-style line-by-line chat, multi-line input, live footer."""
 import asyncio
 import os
+import shutil
 import sys
 import random
 
@@ -1126,6 +1127,28 @@ class MimicodeApp(App):
 # ---------------------------------------------------------------------------
 
 def main(session_id: str | None = None) -> None:
+    # Check for ripgrep (required dependency)
+    if not shutil.which("rg"):
+        print("error: ripgrep (rg) is not installed", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("mimicode requires ripgrep for file searching.", file=sys.stderr)
+        print("Install it with one of these methods:", file=sys.stderr)
+        print("", file=sys.stderr)
+        if sys.platform == "darwin":
+            print("  macOS:  brew install ripgrep", file=sys.stderr)
+        elif sys.platform.startswith("linux"):
+            print("  Ubuntu/Debian:  sudo apt install ripgrep", file=sys.stderr)
+            print("  Fedora/RHEL:    sudo dnf install ripgrep", file=sys.stderr)
+            print("  Arch Linux:     sudo pacman -S ripgrep", file=sys.stderr)
+        elif sys.platform == "win32":
+            print("  Windows:  choco install ripgrep", file=sys.stderr)
+            print("            scoop install ripgrep", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Or download from: https://github.com/BurntSushi/ripgrep/releases", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Run 'python3 check_deps.py' for a full dependency check.", file=sys.stderr)
+        sys.exit(1)
+    
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("error: ANTHROPIC_API_KEY not set", file=sys.stderr)
         sys.exit(1)

@@ -189,28 +189,104 @@ async def write(path: str, content: str, cwd: str = ".") -> ToolResult:
     return ToolResult(output=f"wrote {len(content)} bytes to {path}")
 
 
-async def edit(path: str, old_text: str, new_text: str, cwd: str = ".") -> ToolResult:
-    """surgical replace. old_text must match exactly once. serialized per path."""
-    if old_text == new_text:
-        return ToolResult(output="[error] old_text and new_text are identical", is_error=True)
+async def edit(
+    path: str,
+    old_text: str | None = None,
+    new_text: str | None = None,
+    cwd: str = ".",
+    edits: list[dict] | None = None,
+) -> ToolResult:
+    """find/replace on a single file. two modes:
+
+    single edit: pass old_text + new_text. old_text must match exactly once.
+    batch edits: pass edits=[{old_text, new_text}, ...] applied sequentially
+                 against an in-memory buffer. atomic: if any edit fails, no
+                 changes are written.
+
+    serialized per absolute path via _file_locks.
+    """
+    # normalize input shape: collapse to a single internal `ops` list.
+    single_given = old_text is not None or new_text is not None
+    if edits is not None and single_given:
+        return ToolResult(
+            output="[error] provide either (old_text, new_text) or edits[], not both",
+            is_error=True,
+        )
+    if edits is None:
+        if not single_given:
+            return ToolResult(
+                output="[error] no edits given: pass old_text+new_text or edits[]",
+                is_error=True,
+            )
+        if old_text is None or new_text is None:
+            return ToolResult(
+                output="[error] single-edit mode requires both old_text and new_text",
+                is_error=True,
+            )
+        ops: list[dict] = [{"old_text": old_text, "new_text": new_text}]
+    else:
+        if not isinstance(edits, list) or not edits:
+            return ToolResult(output="[error] edits[] is empty", is_error=True)
+        ops = edits
+
+    # validate each op shape up front so we fail before opening the file.
+    for i, op in enumerate(ops):
+        if not isinstance(op, dict) or "old_text" not in op or "new_text" not in op:
+            return ToolResult(
+                output=f"[error] edits[{i}]: must be an object with old_text and new_text",
+                is_error=True,
+            )
+        ot, nt = op["old_text"], op["new_text"]
+        if not isinstance(ot, str) or not isinstance(nt, str):
+            return ToolResult(
+                output=f"[error] edits[{i}]: old_text and new_text must be strings",
+                is_error=True,
+            )
+        if ot == nt:
+            return ToolResult(
+                output=f"[error] edits[{i}]: old_text and new_text are identical",
+                is_error=True,
+            )
+
     abs_path = _resolve(path, cwd)
     lock = _file_locks[str(abs_path)]
     async with lock:
         if not abs_path.exists():
             return ToolResult(output=f"[error] not found: {path}", is_error=True)
         try:
-            original = abs_path.read_text(encoding="utf-8")
+            buffer = abs_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return ToolResult(output=f"[error] binary file: {path}", is_error=True)
-        count = original.count(old_text)
-        if count == 0:
-            return ToolResult(output=f"[error] old_text not found in {path}", is_error=True)
-        if count > 1:
-            return ToolResult(
-                output=f"[error] old_text matches {count} times in {path}; make it unique",
-                is_error=True,
-            )
-        updated = original.replace(old_text, new_text, 1)
-        abs_path.write_text(updated, encoding="utf-8")
-        line = original[: original.index(old_text)].count("\n") + 1
-    return ToolResult(output=f"edited {path} at line {line}")
+
+        applied_lines: list[int] = []
+        for i, op in enumerate(ops):
+            ot, nt = op["old_text"], op["new_text"]
+            count = buffer.count(ot)
+            if count == 0:
+                prior = len(applied_lines)
+                ctx = f" ({prior} prior edit{'s' if prior != 1 else ''} applied to buffer)" if prior else ""
+                return ToolResult(
+                    output=f"[error] edits[{i}]: old_text not found in {path}{ctx}",
+                    is_error=True,
+                )
+            if count > 1:
+                return ToolResult(
+                    output=(
+                        f"[error] edits[{i}]: old_text matches {count} times in {path}; "
+                        "make it unique with more surrounding context"
+                    ),
+                    is_error=True,
+                )
+            line = buffer[: buffer.index(ot)].count("\n") + 1
+            applied_lines.append(line)
+            buffer = buffer.replace(ot, nt, 1)
+
+        # atomic write only after all edits succeed against the buffer.
+        abs_path.write_text(buffer, encoding="utf-8")
+
+    if len(applied_lines) == 1:
+        return ToolResult(output=f"edited {path} at line {applied_lines[0]}")
+    lines_str = ", ".join(str(n) for n in applied_lines)
+    return ToolResult(
+        output=f"edited {path}: {len(applied_lines)} changes at lines {lines_str}"
+    )

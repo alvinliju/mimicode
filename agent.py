@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import sys
 from datetime import date
 from pathlib import Path
@@ -44,6 +45,9 @@ ALWAYS EXCLUDE from exploration: .venv/ .git/ node_modules/ sessions/ __pycache_
 EDITING RULES:
 - `read` before `edit`. Always.
 - `edit` requires old_text to match exactly once. Include 2-3 lines of surrounding context so the match is unique.
+- For multiple changes to the SAME file in one logical operation, prefer ONE `edit` call with
+  `edits=[{old_text, new_text}, ...]` over multiple sequential `edit` calls. Batched edits are
+  atomic: all succeed or none apply.
 - `write` only for new files or full rewrites. Never for partial changes.
 
 STYLE:
@@ -98,15 +102,38 @@ TOOLS = [
     },
     {
         "name": "edit",
-        "description": "Surgical find/replace. old_text must match exactly once.",
+        "description": (
+            "Find/replace on a single file. Two modes:\n"
+            "  Single edit: pass old_text + new_text. old_text must match exactly once.\n"
+            "  Batched edits: pass edits=[{old_text, new_text}, ...] to apply N changes "
+            "atomically. Each edit's old_text must match exactly once in the file at the time "
+            "it applies (earlier edits take effect first). If any edit fails, no changes land.\n"
+            "Always read before editing. Include 2-3 lines of context in old_text so the match is unique. "
+            "Prefer batched edits[] over multiple sequential edit calls on the same file."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
-                "old_text": {"type": "string"},
-                "new_text": {"type": "string"},
+                "old_text": {"type": "string", "description": "single-edit mode only"},
+                "new_text": {"type": "string", "description": "single-edit mode only"},
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "batch mode: ordered list of {old_text, new_text} edits applied "
+                        "sequentially to the file's in-memory buffer"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": {"type": "string"},
+                            "new_text": {"type": "string"},
+                        },
+                        "required": ["old_text", "new_text"],
+                    },
+                },
             },
-            "required": ["path", "old_text", "new_text"],
+            "required": ["path"],
         },
     },
     {
@@ -334,6 +361,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    
+    # Check for ripgrep (required dependency)
+    if not shutil.which("rg"):
+        print("error: ripgrep (rg) is not installed", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("mimicode requires ripgrep for file searching.", file=sys.stderr)
+        print("Install it with one of these methods:", file=sys.stderr)
+        print("", file=sys.stderr)
+        if sys.platform == "darwin":
+            print("  macOS:  brew install ripgrep", file=sys.stderr)
+        elif sys.platform.startswith("linux"):
+            print("  Ubuntu/Debian:  sudo apt install ripgrep", file=sys.stderr)
+            print("  Fedora/RHEL:    sudo dnf install ripgrep", file=sys.stderr)
+            print("  Arch Linux:     sudo pacman -S ripgrep", file=sys.stderr)
+        elif sys.platform == "win32":
+            print("  Windows:  choco install ripgrep", file=sys.stderr)
+            print("            scoop install ripgrep", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Or download from: https://github.com/BurntSushi/ripgrep/releases", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Run 'python3 check_deps.py' for a full dependency check.", file=sys.stderr)
+        sys.exit(1)
+    
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("error: ANTHROPIC_API_KEY not set", file=sys.stderr)
         sys.exit(1)

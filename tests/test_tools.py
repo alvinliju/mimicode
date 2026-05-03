@@ -211,6 +211,152 @@ def test_edit_multiline(tmp_path):
     assert "return 2" in f.read_text()
 
 
+# ---------- batched edits: edits=[...] mode ----------
+
+def test_edit_via_edits_list_with_one_item(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text("x = 1\ny = 2\n")
+    r = run(edit(str(f), edits=[{"old_text": "y = 2", "new_text": "y = 42"}]))
+    assert r.is_error is False
+    assert f.read_text() == "x = 1\ny = 42\n"
+    assert "line 2" in r.output
+
+
+def test_edit_batched_success(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text("a = 1\nb = 2\nc = 3\nd = 4\n")
+    r = run(edit(
+        str(f),
+        edits=[
+            {"old_text": "a = 1", "new_text": "a = 10"},
+            {"old_text": "c = 3", "new_text": "c = 30"},
+            {"old_text": "d = 4", "new_text": "d = 40"},
+        ],
+    ))
+    assert r.is_error is False
+    assert f.read_text() == "a = 10\nb = 2\nc = 30\nd = 40\n"
+    assert "3 changes" in r.output
+
+
+def test_edit_batched_atomic_on_match_failure(tmp_path):
+    f = tmp_path / "x.py"
+    original = "a = 1\nb = 2\nc = 3\n"
+    f.write_text(original)
+    r = run(edit(
+        str(f),
+        edits=[
+            {"old_text": "a = 1", "new_text": "a = 99"},
+            {"old_text": "DOES_NOT_EXIST", "new_text": "x"},
+            {"old_text": "c = 3", "new_text": "c = 99"},
+        ],
+    ))
+    assert r.is_error is True
+    assert "edits[1]" in r.output
+    assert "1 prior edit" in r.output
+    # file must be unchanged on disk
+    assert f.read_text() == original
+
+
+def test_edit_batched_atomic_on_ambiguous(tmp_path):
+    f = tmp_path / "x.py"
+    original = "a\na\nb\n"
+    f.write_text(original)
+    r = run(edit(
+        str(f),
+        edits=[
+            {"old_text": "b", "new_text": "B"},
+            {"old_text": "a", "new_text": "A"},
+        ],
+    ))
+    assert r.is_error is True
+    assert "edits[1]" in r.output
+    assert "2 times" in r.output
+    assert f.read_text() == original
+
+
+def test_edit_batched_sequential_dependency(tmp_path):
+    """edit[1] should match content created by edit[0]."""
+    f = tmp_path / "x.py"
+    f.write_text("hello world\n")
+    r = run(edit(
+        str(f),
+        edits=[
+            {"old_text": "hello world", "new_text": "hello there"},
+            {"old_text": "hello there", "new_text": "goodbye there"},
+        ],
+    ))
+    assert r.is_error is False
+    assert f.read_text() == "goodbye there\n"
+
+
+def test_edit_batched_no_op_rejected(tmp_path):
+    f = tmp_path / "x.py"
+    original = "a\nb\n"
+    f.write_text(original)
+    r = run(edit(
+        str(f),
+        edits=[
+            {"old_text": "a", "new_text": "A"},
+            {"old_text": "b", "new_text": "b"},  # no-op
+        ],
+    ))
+    assert r.is_error is True
+    assert "edits[1]" in r.output
+    assert "identical" in r.output
+    assert f.read_text() == original
+
+
+def test_edit_batched_empty_list_errors(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text("hi")
+    r = run(edit(str(f), edits=[]))
+    assert r.is_error is True
+    assert "empty" in r.output
+    assert f.read_text() == "hi"
+
+
+def test_edit_both_modes_provided_errors(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text("hi")
+    r = run(edit(
+        str(f),
+        old_text="hi",
+        new_text="bye",
+        edits=[{"old_text": "hi", "new_text": "bye"}],
+    ))
+    assert r.is_error is True
+    assert "not both" in r.output
+    assert f.read_text() == "hi"
+
+
+def test_edit_neither_mode_provided_errors(tmp_path):
+    f = tmp_path / "x.py"
+    f.write_text("hi")
+    r = run(edit(str(f)))
+    assert r.is_error is True
+    assert "no edits given" in r.output
+    assert f.read_text() == "hi"
+
+
+def test_edit_batched_malformed_op_errors(tmp_path):
+    f = tmp_path / "x.py"
+    original = "hi"
+    f.write_text(original)
+    r = run(edit(str(f), edits=[{"old_text": "hi"}]))  # missing new_text
+    assert r.is_error is True
+    assert "edits[0]" in r.output
+    assert f.read_text() == original
+
+
+def test_edit_batched_missing_file(tmp_path):
+    r = run(edit(
+        str(tmp_path / "no_such_file.py"),
+        edits=[{"old_text": "x", "new_text": "y"}],
+    ))
+    assert r.is_error is True
+    assert "not found" in r.output
+
+
 # ---------- guardrail: vet() ----------
 
 @pytest.mark.parametrize(
