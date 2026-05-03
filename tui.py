@@ -18,18 +18,103 @@ from logger import log, start_session
 from tools_session import all_sessions_token_usage, session_token_usage
 
 # ---------------------------------------------------------------------------
-# Palette — VS Code Dark+ inspired
+# Color Palettes
 # ---------------------------------------------------------------------------
-_BG     = "#1e1e1e"
-_BG2    = "#252526"
-_FG     = "#cccccc"
-_DIM    = "#6a6a6a"
-_USER   = "#569cd6"
-_BOT    = "#4ec9b0"
-_TOOL   = "#dcdcaa"
-_OK     = "#6a9955"
-_ERR    = "#f44747"
-_ACCENT = "#007acc"
+
+# Default terminal colors (None palette)
+_PALETTES = {
+    "none": {
+        "BG": "default",
+        "BG2": "default", 
+        "FG": "default",
+        "DIM": "bright_black",
+        "USER": "bright_blue",
+        "BOT": "bright_cyan",
+        "TOOL": "bright_yellow",
+        "OK": "bright_green",
+        "ERR": "bright_red",
+        "ACCENT": "blue",
+    },
+    "vscode": {
+        "BG": "#1e1e1e",
+        "BG2": "#252526",
+        "FG": "#cccccc",
+        "DIM": "#6a6a6a",
+        "USER": "#569cd6",
+        "BOT": "#4ec9b0",
+        "TOOL": "#dcdcaa",
+        "OK": "#6a9955",
+        "ERR": "#f44747",
+        "ACCENT": "#007acc",
+    },
+    "dracula": {
+        "BG": "#282a36",
+        "BG2": "#21222c",
+        "FG": "#f8f8f2",
+        "DIM": "#6272a4",
+        "USER": "#8be9fd",
+        "BOT": "#50fa7b",
+        "TOOL": "#f1fa8c",
+        "OK": "#50fa7b",
+        "ERR": "#ff5555",
+        "ACCENT": "#bd93f9",
+    },
+    "monokai": {
+        "BG": "#272822",
+        "BG2": "#1e1f1c",
+        "FG": "#f8f8f2",
+        "DIM": "#75715e",
+        "USER": "#66d9ef",
+        "BOT": "#a6e22e",
+        "TOOL": "#e6db74",
+        "OK": "#a6e22e",
+        "ERR": "#f92672",
+        "ACCENT": "#ae81ff",
+    },
+    "gruvbox": {
+        "BG": "#282828",
+        "BG2": "#1d2021",
+        "FG": "#ebdbb2",
+        "DIM": "#928374",
+        "USER": "#83a598",
+        "BOT": "#8ec07c",
+        "TOOL": "#fabd2f",
+        "OK": "#b8bb26",
+        "ERR": "#fb4934",
+        "ACCENT": "#fe8019",
+    },
+    "nord": {
+        "BG": "#2e3440",
+        "BG2": "#3b4252",
+        "FG": "#eceff4",
+        "DIM": "#4c566a",
+        "USER": "#88c0d0",
+        "BOT": "#8fbcbb",
+        "TOOL": "#ebcb8b",
+        "OK": "#a3be8c",
+        "ERR": "#bf616a",
+        "ACCENT": "#5e81ac",
+    },
+}
+
+# Current active palette (default to vscode)
+_CURRENT_PALETTE = "vscode"
+
+def _get_color(key: str) -> str:
+    """Get color from current palette."""
+    return _PALETTES[_CURRENT_PALETTE][key]
+
+# Color accessors
+_BG     = lambda: _get_color("BG")
+_BG2    = lambda: _get_color("BG2")
+_FG     = lambda: _get_color("FG")
+_DIM    = lambda: _get_color("DIM")
+_USER   = lambda: _get_color("USER")
+_BOT    = lambda: _get_color("BOT")
+_TOOL   = lambda: _get_color("TOOL")
+_OK     = lambda: _get_color("OK")
+_ERR    = lambda: _get_color("ERR")
+_ACCENT = lambda: _get_color("ACCENT")
 
 # ---------------------------------------------------------------------------
 # Tool action synonyms and animation
@@ -62,6 +147,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/usage",     "token usage — this session"),
     ("/usage all", "token usage — all sessions"),
     ("/cwd",       "change working directory"),
+    ("/palette",   "change color palette (none/vscode/dracula/monokai/gruvbox/nord)"),
 ]
 
 def _completions(prefix: str) -> list[tuple[str, str]]:
@@ -85,8 +171,31 @@ def _key_arg(tool_name: str, args: dict) -> str:
 # PromptEditor
 # ---------------------------------------------------------------------------
 
+def _get_prompt_editor_css() -> str:
+    """Generate PromptEditor CSS with current palette colors."""
+    return f"""
+    PromptEditor {{
+        height: auto;
+        min-height: 3;
+        max-height: 10;
+        background: {_BG()};
+        color: {_FG()};
+        border: none;
+        border-top: solid {_ACCENT()};
+        padding: 0 1;
+    }}
+    PromptEditor:focus {{
+        border-top: solid {_USER()};
+    }}
+    PromptEditor .text-area--cursor-line {{
+        background: {_BG2()};
+    }}
+    """
+
 class PromptEditor(TextArea):
     """Multi-line input. Enter=submit, Shift+Enter=newline, Tab=autocomplete."""
+
+    DEFAULT_CSS = _get_prompt_editor_css()
 
     class Submitted(Message):
         def __init__(self, editor: "PromptEditor", value: str) -> None:
@@ -103,25 +212,6 @@ class PromptEditor(TextArea):
         super().__init__(*args, **kwargs)
         # Store actual paste content mapped to placeholder text
         self._paste_content: dict[str, str] = {}
-
-    DEFAULT_CSS = f"""
-    PromptEditor {{
-        height: auto;
-        min-height: 3;
-        max-height: 10;
-        background: {_BG};
-        color: {_FG};
-        border: none;
-        border-top: solid {_ACCENT};
-        padding: 0 1;
-    }}
-    PromptEditor:focus {{
-        border-top: solid {_USER};
-    }}
-    PromptEditor .text-area--cursor-line {{
-        background: {_BG2};
-    }}
-    """
 
     def on_paste(self, event: events.Paste) -> None:
         """Handle paste events and show indicator for multi-line pastes."""
@@ -194,13 +284,12 @@ class PromptEditor(TextArea):
 # AutocompleteBox
 # ---------------------------------------------------------------------------
 
-class AutocompleteBox(Static):
-    """Floating slash-command suggestions shown above the editor."""
-
-    DEFAULT_CSS = f"""
+def _get_autocomplete_css() -> str:
+    """Generate AutocompleteBox CSS with current palette colors."""
+    return f"""
     AutocompleteBox {{
-        background: {_BG2};
-        border: solid {_ACCENT};
+        background: {_BG2()};
+        border: solid {_ACCENT()};
         padding: 0 1;
         height: auto;
         display: none;
@@ -210,6 +299,11 @@ class AutocompleteBox(Static):
     }}
     """
 
+class AutocompleteBox(Static):
+    """Floating slash-command suggestions shown above the editor."""
+
+    DEFAULT_CSS = _get_autocomplete_css()
+
     def show_completions(self, matches: list[tuple[str, str]]) -> None:
         if not matches:
             self.remove_class("visible")
@@ -218,9 +312,9 @@ class AutocompleteBox(Static):
         for i, (cmd, desc) in enumerate(matches):
             indicator = " → " if i == 0 else "   "
             row = Text.assemble(
-                (indicator, f"bold {_USER}"),
-                (f"{cmd:<16}", _FG),
-                (f"  {desc}", _DIM),
+                (indicator, f"bold {_USER()}"),
+                (f"{cmd:<16}", _FG()),
+                (f"  {desc}", _DIM()),
             )
             lines.append_text(row)
             if i < len(matches) - 1:
@@ -236,28 +330,27 @@ class AutocompleteBox(Static):
 # MimicodeApp
 # ---------------------------------------------------------------------------
 
-class MimicodeApp(App):
-    """Mimicode TUI — pi-style layout."""
-
-    CSS = f"""
+def _get_app_css() -> str:
+    """Generate app CSS with current palette colors."""
+    return f"""
     Screen {{
-        background: {_BG};
+        background: {_BG()};
     }}
     #header {{
-        background: {_BG2};
-        color: {_DIM};
+        background: {_BG2()};
+        color: {_DIM()};
         height: 1;
         padding: 0 1;
     }}
     #chat {{
         height: 1fr;
-        background: {_BG};
+        background: {_BG()};
         padding: 0 1;
         scrollbar-size: 0 0;
     }}
     #activity {{
         height: 2;
-        background: {_BG};
+        background: {_BG()};
         padding: 0 1;
         display: none;
     }}
@@ -265,12 +358,17 @@ class MimicodeApp(App):
         display: block;
     }}
     #footer-bar {{
-        background: {_BG2};
-        color: {_DIM};
+        background: {_BG2()};
+        color: {_DIM()};
         height: 1;
         padding: 0 1;
     }}
     """
+
+class MimicodeApp(App):
+    """Mimicode TUI — pi-style layout."""
+
+    CSS = _get_app_css()
 
     BINDINGS = [
         Binding("ctrl+d", "quit", "Quit", show=False, priority=True),
@@ -477,7 +575,7 @@ class MimicodeApp(App):
         lines = text.splitlines() or [""]
         for i, line in enumerate(lines):
             pfx = "you  " if i == 0 else "     "
-            self._log().write(Text.assemble((pfx, f"bold {_USER}"), (line, _FG)))
+            self._log().write(Text.assemble((pfx, f"bold {_USER()}"), (line, _FG())))
 
     def _bot(self, text: str) -> None:
         if not text.strip():
@@ -485,7 +583,7 @@ class MimicodeApp(App):
         self._blank()
         
         # Write the bot indicator prefix
-        self._log().write(Text.assemble((" ●   ", f"bold {_BOT}")))
+        self._log().write(Text.assemble((" ●   ", f"bold {_BOT()}")))
         
         # Render markdown content with left padding for alignment
         md = Markdown(text)
@@ -497,21 +595,21 @@ class MimicodeApp(App):
         if len(parts) > 90:
             parts = parts[:90] + "…"
         self._log().write(Text.assemble(
-            (" ⚙   ", f"bold {_TOOL}"),
-            (name + "  ", _TOOL),
-            (parts, _DIM),
+            (" ⚙   ", f"bold {_TOOL()}"),
+            (name + "  ", _TOOL()),
+            (parts, _DIM()),
         ))
 
     def _tool_result(self, output: str, is_error: bool) -> None:
         icon  = " ✗   " if is_error else " ✓   "
-        color = _ERR if is_error else _OK
+        color = _ERR() if is_error else _OK()
         preview = output.replace("\n", "  ")[:120]
         if len(output) > 120:
             preview += f"…  ({len(output):,} chars)"
-        self._log().write(Text.assemble((icon, f"bold {color}"), (preview, _DIM)))
+        self._log().write(Text.assemble((icon, f"bold {color}"), (preview, _DIM())))
 
     def _sys(self, text: str) -> None:
-        self._log().write(Text.assemble(("     ", ""), (text, _DIM)))
+        self._log().write(Text.assemble(("     ", ""), (text, _DIM())))
 
     # -----------------------------------------------------------------------
     # Footer
@@ -523,7 +621,7 @@ class MimicodeApp(App):
         if tool_name is None:
             # Start animation for "thinking"
             self._start_animation_timer()
-            widget.update(Text.assemble((" ●  ", f"bold {_BOT}"), ("thinking…", _DIM)))
+            widget.update(Text.assemble((" ●  ", f"bold {_BOT()}"), ("thinking…", _DIM())))
             widget.add_class("active")
             return
         
@@ -532,28 +630,28 @@ class MimicodeApp(App):
         anim_char = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
         
         line1 = Text.assemble(
-            (f" {anim_char}  ", f"bold {_TOOL}"),
-            (f"{verb}  ", _TOOL),
-            (key, _DIM),
+            (f" {anim_char}  ", f"bold {_TOOL()}"),
+            (f"{verb}  ", _TOOL()),
+            (key, _DIM()),
         )
         if result is not None:
             # Keep animation running even when showing results
             ok    = not (args or {}).get("_is_error")
             icon  = "✓" if ok else "✗"
-            color = _OK if ok else _ERR
+            color = _OK() if ok else _ERR()
             preview = result.replace("\n", "  ")[:80] + ("…" if len(result) > 80 else "")
             anim_result = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
             line2 = Text.assemble(
                 (f" └─ {anim_result} {icon}  ", f"bold {color}"),
-                (preview, _DIM),
+                (preview, _DIM()),
             )
         else:
             # Start animation for running tool
             self._start_animation_timer()
             anim_running = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
             line2 = Text.assemble(
-                (f" └─ {anim_running}  ", _DIM), 
-                ("processing…", _DIM)
+                (f" └─ {anim_running}  ", _DIM()), 
+                ("processing…", _DIM())
             )
         content = Text()
         content.append_text(line1)
@@ -595,10 +693,27 @@ class MimicodeApp(App):
                     # Update thinking animation
                     widget = self.query_one("#activity", Static)
                     anim_char = _ANIMATION_CHARS[self._animation_index % len(_ANIMATION_CHARS)]
-                    widget.update(Text.assemble((f" {anim_char}  ", f"bold {_BOT}"), ("thinking…", _DIM)))
+                    widget.update(Text.assemble((f" {anim_char}  ", f"bold {_BOT()}"), ("thinking…", _DIM())))
         except asyncio.CancelledError:
             pass
 
+    def refresh_css(self) -> None:
+        """Refresh the CSS to apply new palette colors."""
+        # Rebuild all CSS with new palette colors
+        MimicodeApp.CSS = _get_app_css()
+        PromptEditor.DEFAULT_CSS = _get_prompt_editor_css()
+        AutocompleteBox.DEFAULT_CSS = _get_autocomplete_css()
+        
+        # Reparse the stylesheet
+        try:
+            self.stylesheet.reparse()
+        except:
+            # If reparse doesn't exist, try other methods
+            pass
+        
+        # Trigger a full screen refresh
+        self.refresh(layout=True, repaint=True)
+        
     def _update_header(self) -> None:
         self.query_one("#header", Label).update(
             f"mimicode  ·  {self.session.id}  ·  {self.cwd}  ·  shift+enter for newline"
@@ -684,6 +799,7 @@ class MimicodeApp(App):
                 "  /usage             token usage for this session",
                 "  /usage all         token usage across all sessions",
                 "  /cwd [path]        change working directory (no arg = show current)",
+                "  /palette <name>    change color palette (none/vscode/dracula/monokai/gruvbox/nord)",
             ]:
                 self._sys(line)
             self._log().scroll_end(animate=True)
@@ -809,6 +925,37 @@ class MimicodeApp(App):
             except (OSError, ValueError) as e:
                 self._sys(f"error changing directory: {e}")
             self._log().scroll_end(animate=True)
+            return True
+
+        if cmd == "/palette":
+            global _CURRENT_PALETTE
+            if len(args) < 2:
+                # Show current palette and available options
+                self._blank()
+                self._sys(f"current palette: {_CURRENT_PALETTE}")
+                self._sys(f"available palettes: {', '.join(_PALETTES.keys())}")
+                self._log().scroll_end(animate=True)
+                return True
+            
+            palette_name = args[1].lower()
+            if palette_name not in _PALETTES:
+                self._sys(f"error: unknown palette '{palette_name}'")
+                self._sys(f"available palettes: {', '.join(_PALETTES.keys())}")
+                self._log().scroll_end(animate=True)
+                return True
+            
+            old_palette = _CURRENT_PALETTE
+            _CURRENT_PALETTE = palette_name
+            
+            # Force a complete UI refresh by reloading CSS
+            self.refresh_css()
+            
+            self._blank()
+            self._sys(f"palette changed from '{old_palette}' to '{palette_name}'")
+            if palette_name == "none":
+                self._sys("using default terminal colors")
+            self._log().scroll_end(animate=True)
+            log("palette_changed", {"old": old_palette, "new": palette_name, "session_id": self.session.id})
             return True
 
         return False
