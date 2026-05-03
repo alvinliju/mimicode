@@ -10,11 +10,52 @@ A minimal coding agent powered by Claude with a focus on deliberate, scoped tool
 - **Safety guardrails**: Blocks dangerous commands (`rm -rf /`, `curl | sh`, etc.)
 - **Smart search enforcement**: Requires `rg` (ripgrep) instead of `find`/`grep -r`
 
-## Installation
+## Quick Start
+
+### Global Installation (Recommended)
+
+Install mimicode globally and run it from anywhere:
+
+```bash
+# Install mimicode (updates PATH automatically)
+curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/mimicode/main/install.sh | bash
+
+# Set your API key (one time)
+export ANTHROPIC_API_KEY="your-key-here"
+
+# Run from any directory!
+cd ~/my-project
+mimicode
+```
+
+The installer will:
+- Clone mimicode to `~/.mimicode`
+- Create a global `mimicode` command
+- Auto-setup virtual environment and dependencies
+- Work on files in whatever directory you run it from
+
+### Local Installation (Alternative)
+
+Clone and run mimicode locally:
+
+```bash
+git clone https://github.com/YOUR_USERNAME/mimicode.git
+cd mimicode
+./mimicode
+```
+
+The `mimicode` launcher will:
+1. Check that ripgrep and Python 3 are installed
+2. Create a virtual environment (if needed)
+3. Install Python dependencies automatically
+4. Launch the TUI
 
 ### Prerequisites
 
-**ripgrep** is required for file searching. Install it first:
+You only need to install these system dependencies once:
+
+1. **Python 3.8+** - [Download from python.org](https://www.python.org/downloads/)
+2. **ripgrep** - Required for fast file searching:
 
 ```bash
 # macOS
@@ -29,37 +70,61 @@ sudo dnf install ripgrep
 # Arch Linux
 sudo pacman -S ripgrep
 
-# Windows (via Chocolatey)
+# Windows (Chocolatey)
 choco install ripgrep
 
-# Windows (via Scoop)
+# Windows (Scoop)
 scoop install ripgrep
 
 # Or download from: https://github.com/BurntSushi/ripgrep/releases
 ```
 
-### Python Dependencies
+3. **Anthropic API Key** - Set your API key:
+
+```bash
+# Linux/Mac (add to ~/.bashrc or ~/.zshrc for persistence)
+export ANTHROPIC_API_KEY="your-key-here"
+
+# Windows
+set ANTHROPIC_API_KEY=your-key-here
+```
+
+### Manual Setup (Alternative)
+
+If you prefer manual control:
 
 ```bash
 # Quick setup (checks dependencies and installs Python packages)
 ./setup.sh
 
-# OR manually install Python dependencies
-pip install -r requirements.txt
-
 # Set your Anthropic API key
-export ANTHROPIC_API_KEY="your-key-here"  # Linux/Mac
-# or
-set ANTHROPIC_API_KEY=your-key-here       # Windows
+export ANTHROPIC_API_KEY="your-key-here"
 
-# Verify all dependencies are installed
+# Verify all dependencies
 python3 check_deps.py
 ```
 
 ## Usage
 
+### If Installed Globally
+
 ```bash
-# tui mode
+# Run from any directory
+cd ~/my-project
+mimicode
+
+# The agent will work on files in your current directory
+# Use /cwd command within TUI to change working directory
+```
+
+### If Running Locally
+
+```bash
+# Easy launcher (recommended)
+./mimicode
+
+# Or use agent.py directly:
+# TUI mode
 python agent.py --tui
 
 # One-shot prompt
@@ -73,6 +138,22 @@ python agent.py -s mysession
 
 # New session in REPL mode
 python agent.py
+```
+
+## Updating & Uninstalling
+
+### Update Global Installation
+
+```bash
+# Re-run the installer to update to latest version
+curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/mimicode/main/install.sh | bash
+```
+
+### Uninstall
+
+```bash
+# Remove global installation
+curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/mimicode/main/uninstall.sh | bash
 ```
 
 ## Architecture
