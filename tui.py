@@ -440,6 +440,8 @@ class MimicodeApp(App):
         self._animation_timer: asyncio.Task | None = None
         self._pmon_enabled: bool = True
         self._pmon_warned: bool = False
+        self._task_start_time: float | None = None
+        self._tools_used_this_turn: bool = False
 
     def compose(self) -> ComposeResult:
         yield Label(
@@ -559,6 +561,7 @@ class MimicodeApp(App):
         elif event_type == "tool_exec_start":
             tool_name = data["name"]
             args      = data["args"]
+            self._tools_used_this_turn = True
             self._last_tool_name = tool_name
             self._last_tool_args = args
             self._last_tool_result = None
@@ -629,6 +632,14 @@ class MimicodeApp(App):
     # -----------------------------------------------------------------------
     # Chat write helpers — all use rich.text.Text, never raw markup strings
     # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        s = int(seconds)
+        if s < 60:
+            return f"{s}s"
+        m, s = divmod(s, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
 
     def _log(self) -> RichLog:
         return self.query_one("#chat", RichLog)
@@ -1203,6 +1214,8 @@ class MimicodeApp(App):
         self._cancel_event.clear()
         self._current_text_blocks.clear()
         self._current_tool_blocks.clear()
+        self._task_start_time = asyncio.get_event_loop().time()
+        self._tools_used_this_turn = False
 
         messages_snapshot  = list(self.messages)
         self._agent_task   = asyncio.create_task(
@@ -1242,6 +1255,9 @@ class MimicodeApp(App):
             self._agent_task = None
             if not self._interrupted:
                 self._clear_activity()
+                if self._tools_used_this_turn and self._task_start_time is not None:
+                    elapsed = asyncio.get_event_loop().time() - self._task_start_time
+                    self._sys(f"worked for {self._format_duration(elapsed)}")
                 self._update_footer()
                 self._log().scroll_end(animate=True)
                 editor.disabled    = False
