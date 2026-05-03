@@ -217,39 +217,52 @@ class PromptEditor(TextArea):
         # Store actual paste content mapped to placeholder text
         self._paste_content: dict[str, str] = {}
 
-    def on_paste(self, event: events.Paste) -> None:
-        """Handle paste events and show indicator for multi-line pastes."""
+    def _on_paste(self, event: events.Paste) -> None:
+        """Intercept paste before TextArea processes it."""
         pasted_text = event.text
-        # Count actual lines (split by newlines)
         lines = pasted_text.splitlines()
-        line_count = len(lines)
-        
-        if line_count > 1:
-            # Multi-line paste - show indicator instead of pasted content
+
+        if len(lines) > 1:
             event.prevent_default()
-            placeholder = f"[Pasted {line_count} lines]"
-            # Store the actual content mapped to this placeholder
+            event.stop()
+            placeholder = f"[Pasted {len(lines)} lines]"
             self._paste_content[placeholder] = pasted_text
             self.insert(placeholder)
+        else:
+            super()._on_paste(event)
 
-    def on_key(self, event: events.Key) -> None:
+    def _on_key(self, event: events.Key) -> None:
+        """Intercept keys before TextArea's default handling."""
         if event.key == "enter":
             event.prevent_default()
+            event.stop()
             text = self.text.strip()
             if text:
-                # Expand any paste placeholders before submitting
                 expanded_text = self._expand_paste_placeholders(text)
                 self.post_message(self.Submitted(self, expanded_text))
                 self.load_text("")
-                # Clear paste content after submission
                 self._paste_content.clear()
         elif event.key == "shift+enter":
-            # Shift+Enter always inserts a newline for multiline editing
             event.prevent_default()
+            event.stop()
             self.insert("\n")
         elif event.key == "tab":
             event.prevent_default()
+            event.stop()
             self.post_message(self.TabPressed(self))
+        elif event.key == "backspace":
+            row, col = self.cursor_location
+            line_text = self.document.get_line(row)
+            text_before = line_text[:col]
+            for placeholder in list(self._paste_content.keys()):
+                if text_before.endswith(placeholder):
+                    event.prevent_default()
+                    event.stop()
+                    # Select the whole placeholder and delete it as one unit
+                    self.move_cursor((row, col - len(placeholder)), select=True)
+                    self.insert("")
+                    del self._paste_content[placeholder]
+                    return
     
     def _expand_paste_placeholders(self, text: str) -> str:
         """Replace all paste placeholders with their actual content."""
