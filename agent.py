@@ -65,6 +65,11 @@ MEMORY RULES:
   ("how did we previously...", "have we built...", "where did we decide..."), call `memory_search`
   before reading source files. It searches past sessions, components, and decisions by keyword.
 
+DEBUGGING RULES:
+- Before editing any file in response to an error, determine whether the error is in the code or in how it was invoked. Most errors are invocation errors, not code bugs.
+- `command not found: <file>.py` means the shell can't execute the file as a program — the script's code is almost certainly fine. ALWAYS explain `python <file>.py` as the fix. Do NOT edit the file, add a shebang, or chmod unless the user explicitly says they want the script runnable without a python prefix.
+- Non-zero exit codes from test runners (pytest, etc.) are expected when tests fail — read the output for the actual counts. Do not treat a failing test run as a tool error.
+
 STYLE:
 - Prefer one targeted tool call over a broad one. Scope searches.
 - Tool output is capped at 100KB. If you hit that, your scope was too wide.
@@ -221,7 +226,8 @@ async def memory_search_tool(
     cwd: str = ".",
 ) -> ToolResult:
     """Tool wrapper around memory_search.search. Always succeeds; returns
-    a no-match notice rather than an error when nothing is found."""
+    a no-match notice rather than an error when nothing is found.
+    """
     try:
         results = _memory_search(query=query, top_k=top_k, kind=kind, cwd=cwd)
     except Exception as e:
