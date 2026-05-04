@@ -14,7 +14,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import Label, RichLog, Static, TextArea
 
-from agent import AgentInterrupted, agent_turn, load_messages, save_messages
+from agent import AgentInterrupted, _run_reflect, agent_turn, load_messages, save_messages
 from logger import log, start_session
 from tools_router import analyze_routing, format_routing_stats
 from tools_session import all_sessions_token_usage, session_token_usage
@@ -1309,7 +1309,9 @@ def main(session_id: str | None = None) -> None:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("error: ANTHROPIC_API_KEY not set", file=sys.stderr)
         sys.exit(1)
-    MimicodeApp(session_id=session_id).run()
+    app = MimicodeApp(session_id=session_id)
+    app.run()
+    _run_reflect(app.session.id, app.cwd)
 
 
 if __name__ == "__main__":

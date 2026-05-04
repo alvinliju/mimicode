@@ -17,9 +17,12 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+
+_AGENT_DIR = Path(__file__).resolve().parent
 
 from logger import log, start_session
 from memory_search import format_results as _format_search_results
@@ -462,6 +465,24 @@ async def _run_repl(session_path: Path, cwd: str, session_id: str) -> None:
     log("repl_end", {"turns": sum(1 for m in messages if m["role"] == "user")})
 
 
+def _run_reflect(session_id: str, cwd: str) -> None:
+    """Run reflect.py synchronously after a session ends. Fast (one haiku call)."""
+    print(f"[mimicode] reflecting on session {session_id}...", file=sys.stderr)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(_AGENT_DIR / "reflect.py"), session_id, "--cwd", cwd],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.stdout:
+            print(result.stdout.strip(), file=sys.stderr)
+        if result.returncode != 0 and result.stderr:
+            print(f"[reflect] {result.stderr.strip()}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print("[reflect] timed out", file=sys.stderr)
+    except Exception as e:
+        print(f"[reflect] skipped: {e}", file=sys.stderr)
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="agent", description="mimicode coding agent")
     p.add_argument("-s", "--session", metavar="ID", help="session id (new or resume)")
@@ -520,6 +541,7 @@ def main(argv: list[str] | None = None) -> None:
         asyncio.run(_run_one_shot(prompt, sess.path, cwd, sess.id))
     else:
         asyncio.run(_run_repl(sess.path, cwd, sess.id))
+    _run_reflect(sess.id, cwd)
 
 
 if __name__ == "__main__":

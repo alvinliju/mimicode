@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -115,8 +114,12 @@ def reflect(session_id: str, cwd: Path, dry_run: bool = False) -> int:
         messages=[{"role": "user", "content": prompt}],
     )
     result = resp.content[0].text.strip()
+    # strip markdown code fences if model wrapped the output
+    if result.startswith("```"):
+        lines = result.splitlines()
+        result = "\n".join(l for l in lines if not l.startswith("```")).strip()
 
-    if result == "NO_CHANGE":
+    if result.startswith("NO_CHANGE"):
         print(f"[reflect] no rule changes for {session_id}")
         return 0
 
@@ -128,19 +131,6 @@ def reflect(session_id: str, cwd: Path, dry_run: bool = False) -> int:
     rules_path.parent.mkdir(parents=True, exist_ok=True)
     rules_path.write_text(result + "\n", encoding="utf-8")
     print(f"[reflect] updated RULES.md ({len(result)} chars)")
-
-    try:
-        subprocess.run(
-            ["git", "add", str(rules_path)],
-            cwd=str(cwd), check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", f"reflect: {session_id}"],
-            cwd=str(cwd), check=True, capture_output=True,
-        )
-        print(f"[reflect] committed rules update")
-    except subprocess.CalledProcessError:
-        print("[reflect] git commit skipped (no git or nothing staged)")
 
     return 0
 
