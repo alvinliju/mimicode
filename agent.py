@@ -476,10 +476,9 @@ def _run_reflect(session_id: str, cwd: str) -> None:
             [sys.executable, str(_AGENT_DIR / "reflect.py"), session_id, "--cwd", cwd],
             capture_output=True, text=True, timeout=60,
         )
-        if result.stdout:
-            print(result.stdout.strip(), file=sys.stderr)
-        if result.returncode != 0 and result.stderr:
-            print(f"[reflect] {result.stderr.strip()}", file=sys.stderr)
+        output = (result.stdout or result.stderr or "").strip()
+        if output:
+            print(output, file=sys.stderr)
     except subprocess.TimeoutExpired:
         print("[reflect] timed out", file=sys.stderr)
     except Exception as e:

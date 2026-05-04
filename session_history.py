@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import TypedDict
 
-SESSIONS_DIR = Path("sessions")
+SESSIONS_DIR = Path.home() / ".mimi" / "sessions"
 HISTORY_FILE = SESSIONS_DIR / ".session_history.json"
 MAX_HISTORY = 5
 

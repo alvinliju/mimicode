@@ -77,7 +77,7 @@ def run_task(task: Task, model: str | None, timeout_s: int) -> dict:
         if model:
             env["MIMICODE_MODEL"] = model  # not currently read; placeholder for future
 
-        session_id = f"bench-{task.name}"
+        session_id = f"bench-{task.name}-{int(time.time())}"
         cmd = [sys.executable, str(AGENT_PY), "-s", session_id, task.prompt]
 
         t0 = time.time()
@@ -95,8 +95,9 @@ def run_task(task: Task, model: str | None, timeout_s: int) -> dict:
             timed_out = True
         elapsed = round(time.time() - t0, 2)
 
-        session_jsonl = cwd / "sessions" / f"{session_id}.jsonl"
-        messages_json = cwd / "sessions" / f"{session_id}.messages.json"
+        global_sessions = Path.home() / ".mimi" / "sessions"
+        session_jsonl = global_sessions / f"{session_id}.jsonl"
+        messages_json = global_sessions / f"{session_id}.messages.json"
         events = []
         if session_jsonl.exists():
             for line in session_jsonl.read_text().splitlines():

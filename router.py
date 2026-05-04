@@ -77,13 +77,22 @@ def parse_intent(messages: list[dict], step: int) -> ModelChoice:
         "strategy", "how to structure", "overall plan"
     ]):
         return ModelChoice(model=SONNET, reason="planning")
-    
+
     # Multi-file operations → Sonnet
     if any(phrase in content_lower for phrase in [
         "all files", "every file", "across files", "multiple files",
         "entire codebase", "project-wide", "refactor all", "rename everywhere"
     ]):
         return ModelChoice(model=SONNET, reason="multi_file")
+
+    # Debugging / broken behavior → Sonnet
+    if any(phrase in content_lower for phrase in [
+        "not working", "doesn't work", "does not work", "broken", "bug",
+        "debug", "why does", "why is", "why isn't", "why doesn't",
+        "error", "fail", "crash", "stall", "stuck", "wrong",
+        "issue", "problem", "investigate", "diagnose",
+    ]):
+        return ModelChoice(model=SONNET, reason="debugging")
     
     # Simple operations → Haiku with guidance
     
@@ -133,8 +142,8 @@ def parse_intent(messages: list[dict], step: int) -> ModelChoice:
             )
         )
     
-    # Default to Haiku for everything else (it's surprisingly capable)
-    return ModelChoice(model=HAIKU, reason="default")
+    # Default to Sonnet — ambiguous prompts need reasoning, not speed
+    return ModelChoice(model=SONNET, reason="default")
 
 
 def route_model(
