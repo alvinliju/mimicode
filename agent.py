@@ -24,7 +24,7 @@ from pathlib import Path
 from logger import log, start_session
 from memory_search import format_results as _format_search_results
 from memory_search import search as _memory_search
-from mimi_memory import auto_update_session, handle_memory_write, init_memory, load_session_context
+from mimi_memory import handle_memory_write, load_memory, load_rules
 from providers import call_claude, call_claude_streaming
 from repomap import build_repo_map
 from router import augment_system_prompt, route_turn
@@ -244,66 +244,20 @@ _TOOL_FNS = {
 }
 
 
-def build_system(cwd: str, memory_context: str = "", repo_map: str = "") -> str:
+def build_system(cwd: str, repo_map: str = "") -> str:
     base = f"{SYSTEM_PROMPT}\n\nCurrent date: {date.today().isoformat()}\nCurrent working directory: {cwd}"
     if repo_map:
         base += (
             "\n\n## Repository map (Python symbols by file; not source of truth — read the file before editing)\n"
             f"{repo_map}"
         )
-    if memory_context:
-        base += f"\n\n{memory_context}"
+    rules = load_rules(cwd)
+    if rules:
+        base += f"\n\n## Behavioral rules\n{rules}"
+    memory = load_memory(cwd)
+    if memory:
+        base += f"\n\n## Memory\n{memory}"
     return base
-
-
-def _scan_relevant_memory(cwd: Path) -> dict[str, list[str]]:
-    """Return {kind: [ids]} for components/decisions whose related_files
-    list contains any file that exists in cwd.
-
-    Used to decide whether to nudge the agent toward `memory_search` —
-    we don't load the contents here, only the IDs. Scanning is cheap
-    (small JSON files); cross-session by design so that any past memory
-    referencing a file in the current cwd surfaces, regardless of which
-    session originally wrote it.
-    """
-    out: dict[str, list[str]] = {"component": [], "decision": []}
-    memory_root = cwd / ".mimi" / "memory"
-    if not memory_root.is_dir():
-        return out
-    for kind, sub in (("component", "components"), ("decision", "decisions")):
-        d = memory_root / sub
-        if not d.is_dir():
-            continue
-        for jf in sorted(d.glob("*.json")):
-            try:
-                data = json.loads(jf.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            related = data.get("related_files") or []
-            if any(rf and (cwd / rf).exists() for rf in related):
-                out[kind].append(jf.stem)
-    return out
-
-
-def _format_memory_nudge(ids: dict[str, list[str]]) -> str:
-    """Render the relevance hits as a small system-prompt block. Empty
-    string when nothing matched, so the prompt stays clean for fresh repos
-    and the prompt cache isn't disturbed by a needless preamble."""
-    if not (ids["component"] or ids["decision"]):
-        return ""
-    parts: list[str] = []
-    if ids["component"]:
-        parts.append(f"components: {', '.join(ids['component'])}")
-    if ids["decision"]:
-        parts.append(f"decisions: {', '.join(ids['decision'])}")
-    return (
-        "## Memory likely relevant to this cwd\n"
-        f"Prior {' / '.join(parts)} reference files that exist here. "
-        "If the user asks about prior work, decisions, or *why* a piece of code is the way it is, "
-        "call `memory_search` BEFORE reading source files."
-    )
 
 
 def messages_path(session_path: Path) -> Path:
@@ -377,30 +331,11 @@ async def agent_turn(
         except ValueError:
             pass
     log("user_message", {"chars": len(user_msg), "resumed": bool(messages)})
-    if session_id:
-        init_memory(session_id)
     if messages is None:
         messages = []
     messages.append({"role": "user", "content": user_msg})
-    memory_context = load_session_context(session_id, cwd) if session_id else ""
-    # cross-session relevance nudge: scan all components/decisions and, if any
-    # of them reference a file that exists in cwd, tell the agent to consider
-    # memory_search before reading source. invisible to the user; cheap; only
-    # adds tokens when there's a real signal.
-    if cwd:
-        relevant_ids = _scan_relevant_memory(Path(cwd))
-        nudge = _format_memory_nudge(relevant_ids)
-        if nudge:
-            log("memory_injected", {
-                "components": relevant_ids["component"],
-                "decisions": relevant_ids["decision"],
-            })
-            memory_context = (memory_context + "\n\n" + nudge) if memory_context else nudge
-    # repo-map: built once per session and cached to .mimi/repomap.txt; fast on
-    # repeat turns. stale-during-session is intentional — keeps the prompt
-    # cache warm. agent reads actual files when it needs ground truth.
     repo_map = build_repo_map(cwd) if cwd else ""
-    system = build_system(cwd, memory_context, repo_map)
+    system = build_system(cwd, repo_map)
 
     # pin model + guidance for the whole turn. mid-turn model flips invalidate
     # the prompt cache (each model has its own cache namespace) and per-step
@@ -444,8 +379,6 @@ async def agent_turn(
         tool_uses = [b for b in assistant["content"] if b.get("type") == "tool_use"]
         if not tool_uses:
             log("turn_end", {"steps": step + 1, "reason": "no_tool_use"})
-            if session_id:
-                auto_update_session(session_id, messages)
             return messages
 
         results = []
@@ -479,8 +412,6 @@ async def agent_turn(
         messages.append({"role": "user", "content": results})
 
     log("turn_end", {"steps": max_steps, "reason": "max_steps"})
-    if session_id:
-        auto_update_session(session_id, messages)
     return messages
 
 

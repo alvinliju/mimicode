@@ -121,50 +121,19 @@ def _index_sessions(conn: sqlite3.Connection, sessions_dir: Path) -> int:
     return count
 
 
-def _index_components(conn: sqlite3.Connection, components_dir: Path) -> int:
-    if not components_dir.is_dir():
-        return 0
+def _index_memory_md(conn: sqlite3.Connection, memory_root: Path) -> int:
+    """Index MEMORY.md sections and RULES.md as searchable entries."""
     count = 0
-    for cj in components_dir.glob("*.json"):
-        data = _read_json(cj)
-        if not isinstance(data, dict):
+    for fname, kind in (("MEMORY.md", "memory"), ("RULES.md", "rules")):
+        p = memory_root / fname
+        if not p.exists():
             continue
-        text_parts = [
-            data.get("summary", ""),
-            data.get("detail", ""),
-            " ".join(data.get("tags", []) or []),
-        ]
-        text = "\n".join(p for p in text_parts if p)
-        if not text.strip():
-            continue
-        file_scope = " ".join(data.get("related_files", []) or [])
-        conn.execute(
-            "INSERT INTO memory(kind, source_id, text, file_scope) VALUES(?,?,?,?)",
-            ("component", cj.stem, text, file_scope),
-        )
-        count += 1
-    return count
-
-
-def _index_decisions(conn: sqlite3.Connection, decisions_dir: Path) -> int:
-    if not decisions_dir.is_dir():
-        return 0
-    count = 0
-    for dj in decisions_dir.glob("*.json"):
-        data = _read_json(dj)
-        if not isinstance(data, dict):
-            continue
-        text_parts = [
-            data.get("summary", ""),
-            data.get("detail", ""),
-            " ".join(data.get("tags", []) or []),
-        ]
-        text = "\n".join(p for p in text_parts if p)
-        if not text.strip():
+        text = p.read_text(encoding="utf-8").strip()
+        if not text:
             continue
         conn.execute(
             "INSERT INTO memory(kind, source_id, text, file_scope) VALUES(?,?,?,?)",
-            ("decision", dj.stem, text, ""),
+            (kind, fname, text, ""),
         )
         count += 1
     return count
@@ -175,19 +144,15 @@ def reindex(
     memory_root: Path,
     db_path: Path,
 ) -> dict:
-    """Rebuild the FTS index from scratch. Returns counts per kind.
-    Cheap on small repos (< few hundred docs); we'll add incremental
-    indexing only if the bench shows latency matters."""
     conn = _connect(db_path)
     try:
         conn.execute("DELETE FROM memory")
         sessions = _index_sessions(conn, sessions_dir)
-        components = _index_components(conn, memory_root / "components")
-        decisions = _index_decisions(conn, memory_root / "decisions")
+        md_count = _index_memory_md(conn, memory_root)
         conn.commit()
     finally:
         conn.close()
-    return {"session": sessions, "component": components, "decision": decisions}
+    return {"session": sessions, "memory_md": md_count}
 
 
 def _escape_fts_query(query: str) -> str:
