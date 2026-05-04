@@ -10,8 +10,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-LOG_DIR = Path("sessions")
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR = Path.home() / ".mimi" / "sessions"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass

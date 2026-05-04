@@ -142,6 +142,12 @@ async def read(
     """read a text file. 1-indexed line offset + optional limit.
     refuses binary files. defaults to first 2000 lines.
     returns output prefixed with line numbers, truncation marker if capped."""
+    try:
+        offset = int(offset)
+        if limit is not None:
+            limit = int(limit)
+    except (TypeError, ValueError):
+        return ToolResult(output="[error] offset and limit must be integers", is_error=True)
     abs_path = (Path(cwd) / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
     if not abs_path.exists():
         return ToolResult(output=f"[error] not found: {path}", is_error=True)

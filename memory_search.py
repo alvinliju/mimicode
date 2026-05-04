@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_DB = ".mimi/sessions.db"
-DEFAULT_SESSIONS_DIR = "sessions"
+DEFAULT_SESSIONS_DIR = str(Path.home() / ".mimi" / "sessions")
 DEFAULT_MEMORY_ROOT = ".mimi/memory"
 
 

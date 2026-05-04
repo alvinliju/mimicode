@@ -200,11 +200,11 @@ TOOLS = [
         "name": "memory_search",
         "description": (
             "Lexical (FTS5) search over past sessions, components, and decisions stored under "
-            ".mimi/memory/ and sessions/. Use this BEFORE reading source files when the user "
+            "~/.mimi/sessions/ and .mimi/. Use this BEFORE reading source files when the user "
             "asks about prior work in this codebase ('how did we previously...', 'have we built...', "
             "'where did we decide...'). Returns up to top_k snippets with source IDs. Local only — "
             "no embeddings, no network. You can read a returned session by calling `read` on "
-            "sessions/<source_id>.messages.json, or a component via .mimi/memory/components/<id>.json.\n"
+            "~/.mimi/sessions/<source_id>.messages.json, or memory via .mimi/MEMORY.md.\n"
             "Query tips: bare keywords are auto-quoted (`router model` matches both words). "
             "Use double-quotes for an exact phrase: `\"intent based router\"`. Use `kind` to filter "
             "to one of session/component/decision when you know which you want."
@@ -394,7 +394,10 @@ async def agent_turn(
                     "args": tu.get("input", {}) or {},
                 })
 
-            result = await _dispatch(tu["name"], tu.get("input", {}) or {}, cwd, session_id)
+            try:
+                result = await _dispatch(tu["name"], tu.get("input", {}) or {}, cwd, session_id)
+            except Exception as e:
+                result = ToolResult(output=f"[error] dispatch failed: {e}", is_error=True)
 
             _check_cancel()
 

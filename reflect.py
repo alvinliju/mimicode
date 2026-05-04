@@ -18,6 +18,7 @@ from pathlib import Path
 
 import anthropic
 
+GLOBAL_MIMI = Path.home() / ".mimi"
 RULES_PATH = Path(".mimi/RULES.md")
 MEMORY_PATH = Path(".mimi/MEMORY.md")
 MODEL = "claude-haiku-4-5-20251001"
@@ -80,7 +81,7 @@ def _flatten_transcript(messages: list[dict]) -> str:
 
 
 def reflect(session_id: str, cwd: Path, dry_run: bool = False) -> int:
-    messages_path = cwd / "sessions" / f"{session_id}.messages.json"
+    messages_path = GLOBAL_MIMI / "sessions" / f"{session_id}.messages.json"
     if not messages_path.exists():
         print(f"[reflect] no transcript found: {messages_path}", file=sys.stderr)
         return 1
