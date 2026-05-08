@@ -16,9 +16,11 @@ from textual.widgets import Label, RichLog, Static, TextArea
 
 from agent import AgentInterrupted, _run_reflect, agent_turn, load_messages, save_messages
 from logger import log, start_session
+from providers import get_last_usage
 from tools_router import analyze_routing, format_routing_stats
 from tools_session import all_sessions_token_usage, session_token_usage
 from session_history import add_to_history, get_most_recent, get_all, get_by_session_id
+import compactor
 
 # ---------------------------------------------------------------------------
 # Color Palettes
@@ -158,6 +160,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/cwd",       "change working directory"),
     ("/palette",   "change theme (none/default/dark/light/dark_blue/light_blue)"),
     ("/pmon",      "toggle prompt monitoring (warns on vague prompts)"),
+    ("/compact",   "compact conversation now (or /compact on|off|status)"),
 ]
 
 def _completions(prefix: str) -> list[tuple[str, str]]:
@@ -931,6 +934,7 @@ class MimicodeApp(App):
                 "  /cwd [path]        change working directory (no arg = show current)",
                 "  /palette <name>    change theme (none/default/dark/light/dark_blue/light_blue)",
                 "  /pmon              toggle prompt monitoring (warns on vague prompts)",
+                "  /compact           compact older turns now (or /compact on|off|status)",
             ]:
                 self._sys(line)
             self._log().scroll_end(animate=True)
@@ -1188,6 +1192,35 @@ class MimicodeApp(App):
             self._log().scroll_end(animate=True)
             return True
 
+        if cmd == "/compact":
+            sub = args[1].lower() if len(args) >= 2 else ""
+            if sub == "on":
+                compactor.set_auto(True)
+                self._sys("auto-compaction: on")
+            elif sub == "off":
+                compactor.set_auto(False)
+                self._sys("auto-compaction: off")
+            elif sub == "status":
+                last_in = get_last_usage().get("tokens_in", 0)
+                self._sys(compactor.status_text(self.session.path, last_in))
+            elif sub == "":
+                new_messages, record = compactor.compact(
+                    self.messages, self.session.path, reason="manual"
+                )
+                if record is None:
+                    self._sys("nothing to compact (need >2 user turns).")
+                else:
+                    self.messages = new_messages
+                    save_messages(self.session.path, self.messages)
+                    cid = record.get("id", "?")
+                    rng = record.get("turn_range", ["?", "?"])
+                    self._sys(f"compacted turns {rng[0]}–{rng[1]} -> {cid}")
+                    self._update_footer()
+            else:
+                self._sys("usage: /compact | /compact on | /compact off | /compact status")
+            self._log().scroll_end(animate=True)
+            return True
+
         return False
 
     # -----------------------------------------------------------------------
@@ -1250,6 +1283,17 @@ class MimicodeApp(App):
             if not self._interrupted:
                 save_messages(self.session.path, self.messages)
                 self._render_accumulated_text()
+                last_in = get_last_usage().get("tokens_in", 0)
+                new_messages, record = compactor.maybe_compact(
+                    self.messages, self.session.path, last_in
+                )
+                if record is not None:
+                    self.messages = new_messages
+                    save_messages(self.session.path, self.messages)
+                    cid = record.get("id", "?")
+                    reason = record.get("reason", "")
+                    self._sys(f"[compacted: {reason} -> {cid}]")
+                    self._update_footer()
 
         except (AgentInterrupted, asyncio.CancelledError):
             self.messages = messages_snapshot

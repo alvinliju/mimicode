@@ -17,6 +17,15 @@ DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_MAX_TOKENS = 8192
 _CACHE = {"type": "ephemeral"}
 
+# Most recent usage stats from any call (sync or streaming). Read by the
+# compactor to decide whether the token threshold has been hit. Reset is
+# unnecessary — the compactor only cares about the latest value.
+_last_usage: dict = {"tokens_in": 0, "tokens_out": 0, "model": ""}
+
+
+def get_last_usage() -> dict:
+    return dict(_last_usage)
+
 
 def _wrap_system(system: str) -> list[dict]:
     """system must be a list of blocks to carry cache_control."""
@@ -77,6 +86,13 @@ async def call_claude(
         "role": "assistant",
         "content": [block.model_dump() for block in resp.content],
     }
+    _last_usage.update({
+        "tokens_in": resp.usage.input_tokens,
+        "tokens_out": resp.usage.output_tokens,
+        "cache_read": getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
+        "cache_write": getattr(resp.usage, "cache_creation_input_tokens", 0) or 0,
+        "model": model,
+    })
     log(
         "model_response",
         {
@@ -201,6 +217,15 @@ async def call_claude_streaming(
                     "cache_read": getattr(message.usage, "cache_read_input_tokens", 0) or 0,
                     "cache_write": getattr(message.usage, "cache_creation_input_tokens", 0) or 0,
                 })
+
+    if usage_data:
+        _last_usage.update({
+            "tokens_in": usage_data.get("tokens_in", 0),
+            "tokens_out": usage_data.get("tokens_out", 0),
+            "cache_read": usage_data.get("cache_read", 0),
+            "cache_write": usage_data.get("cache_write", 0),
+            "model": model,
+        })
 
     log("model_response_streaming", {
         "model": model,

@@ -24,3 +24,6 @@ tbench-runs/
 tbench_adapter/*.egg-info/
 tbench_adapter/build/
 tbench_adapter/dist/
+
+#stress tester
+poems/

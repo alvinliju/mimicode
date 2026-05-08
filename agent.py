@@ -28,10 +28,11 @@ from logger import log, start_session
 from memory_search import format_results as _format_search_results
 from memory_search import search as _memory_search
 from mimi_memory import handle_memory_write, load_memory, load_rules
-from providers import call_claude, call_claude_streaming
+from providers import call_claude, call_claude_streaming, get_last_usage
 from repomap import build_repo_map
 from router import augment_system_prompt, route_turn
 from tools import ToolResult, bash, edit, read, write
+import compactor
 
 SYSTEM_PROMPT = """You are a coding agent in a minimal harness called mimicode.
 You have four tools: read, bash, edit, write. Use them deliberately.
@@ -197,6 +198,22 @@ TOOLS = [
         },
     },
     {
+        "name": "recall_compaction",
+        "description": (
+            "Retrieve the full record of a prior in-session compaction by id (e.g. 'c001'). "
+            "Compactions appear as '[COMPACTED ... id=cNNN]' synthetic user messages in the "
+            "transcript when older turns have been summarized to save context. Call this tool "
+            "ONLY when the synthetic marker doesn't carry enough detail for the current task. "
+            "With no compaction_id, returns a brief index of all compactions for the current session."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "compaction_id": {"type": "string", "description": "e.g. 'c001'. Omit to list."},
+            },
+        },
+    },
+    {
         "name": "memory_search",
         "description": (
             "Lexical (FTS5) search over past sessions, components, and decisions stored under "
@@ -238,12 +255,44 @@ async def memory_search_tool(
     return ToolResult(output=_format_search_results(results, query))
 
 
+def _session_path_for(session_id: str | None) -> Path | None:
+    if not session_id:
+        return None
+    from logger import LOG_DIR
+    return LOG_DIR / f"{session_id}.jsonl"
+
+
+async def recall_compaction_tool(
+    compaction_id: str | None = None,
+    cwd: str = ".",
+    session_id: str | None = None,
+) -> ToolResult:
+    sp = _session_path_for(session_id)
+    if sp is None:
+        return ToolResult(output="[recall_compaction] no active session", is_error=True)
+    if not compaction_id:
+        items = compactor.list_compactions(sp)
+        if not items:
+            return ToolResult(output="[recall_compaction] no compactions yet")
+        lines = [
+            f"  {c.get('id')} · turns {c.get('turn_range', ['?', '?'])[0]}–"
+            f"{c.get('turn_range', ['?', '?'])[1]} · {c.get('one_line', '')}"
+            for c in items
+        ]
+        return ToolResult(output="compactions (most recent last):\n" + "\n".join(lines))
+    rec = compactor.load_compaction(sp, compaction_id)
+    if rec is None:
+        return ToolResult(output=f"[recall_compaction] no record for id={compaction_id}", is_error=True)
+    return ToolResult(output=json.dumps(rec, indent=2))
+
+
 _TOOL_FNS = {
     "bash": bash,
     "read": read,
     "write": write,
     "edit": edit,
     "memory_search": memory_search_tool,
+    "recall_compaction": recall_compaction_tool,
 }
 
 
@@ -298,7 +347,10 @@ async def _dispatch(name: str, args: dict, cwd: str, session_id: str | None = No
         if fn is None:
             result = ToolResult(output=f"[error] unknown tool: {name}", is_error=True)
         else:
-            result = await fn(cwd=cwd, **args)
+            kwargs = dict(args)
+            if name == "recall_compaction":
+                kwargs["session_id"] = session_id
+            result = await fn(cwd=cwd, **kwargs)
         if result.is_error and not result.output:
             result.output = "[error] (no output)"
     log("tool_result", {"name": name, "is_error": result.is_error, "bytes": len(result.output)})
@@ -438,13 +490,56 @@ def _print_final(messages: list[dict]) -> None:
         print(text)
 
 
+def _maybe_compact_after_turn(messages: list[dict], session_path: Path) -> list[dict]:
+    """Run auto-compaction if a trigger has fired. Saves on success."""
+    last_in = get_last_usage().get("tokens_in", 0)
+    new_messages, record = compactor.maybe_compact(messages, session_path, last_in)
+    if record is not None:
+        save_messages(session_path, new_messages)
+        cid = record.get("id", "?")
+        reason = record.get("reason", "")
+        print(f"[mimicode] compacted ({reason}) -> {cid}", file=sys.stderr)
+    return new_messages
+
+
+def _handle_compact_command(prompt: str, messages: list[dict], session_path: Path) -> tuple[bool, list[dict]]:
+    """Returns (handled, messages). Recognizes :compact and its variants."""
+    cmd = prompt.strip().lower()
+    if cmd not in (":compact", ":compact on", ":compact off", ":compact status"):
+        return False, messages
+    if cmd == ":compact on":
+        compactor.set_auto(True)
+        print("[compact] auto-compaction: on", file=sys.stderr)
+        return True, messages
+    if cmd == ":compact off":
+        compactor.set_auto(False)
+        print("[compact] auto-compaction: off", file=sys.stderr)
+        return True, messages
+    if cmd == ":compact status":
+        last_in = get_last_usage().get("tokens_in", 0)
+        print("[compact] " + compactor.status_text(session_path, last_in), file=sys.stderr)
+        return True, messages
+    # bare :compact -> force now
+    new_messages, record = compactor.compact(messages, session_path, reason="manual")
+    if record is None:
+        print("[compact] nothing to compact (need >2 user turns)", file=sys.stderr)
+    else:
+        save_messages(session_path, new_messages)
+        print(f"[compact] manual -> {record.get('id')}", file=sys.stderr)
+    return True, new_messages
+
+
 async def _run_one_shot(prompt: str, session_path: Path, cwd: str, session_id: str) -> None:
     messages = load_messages(session_path)
     resumed = bool(messages)
     if resumed:
         print(f"[mimicode] resumed {len(messages)} prior messages", file=sys.stderr)
+    handled, messages = _handle_compact_command(prompt, messages, session_path)
+    if handled:
+        return
     messages = await agent_turn(prompt, messages=messages, cwd=cwd, session_id=session_id)
     save_messages(session_path, messages)
+    messages = _maybe_compact_after_turn(messages, session_path)
     _print_final(messages)
 
 
@@ -452,7 +547,7 @@ async def _run_repl(session_path: Path, cwd: str, session_id: str) -> None:
     messages = load_messages(session_path)
     if messages:
         print(f"[mimicode] resumed {len(messages)} prior messages", file=sys.stderr)
-    print("[mimicode] REPL. empty line or :q / ctrl-d to exit.", file=sys.stderr)
+    print("[mimicode] REPL. empty line or :q / ctrl-d to exit. :compact for compaction controls.", file=sys.stderr)
     while True:
         try:
             prompt = input("> ").strip()
@@ -461,8 +556,12 @@ async def _run_repl(session_path: Path, cwd: str, session_id: str) -> None:
             break
         if not prompt or prompt in (":q", ":quit", ":exit"):
             break
+        handled, messages = _handle_compact_command(prompt, messages, session_path)
+        if handled:
+            continue
         messages = await agent_turn(prompt, messages=messages, cwd=cwd, session_id=session_id)
         save_messages(session_path, messages)
+        messages = _maybe_compact_after_turn(messages, session_path)
         _print_final(messages)
         print()  # blank line between turns
     log("repl_end", {"turns": sum(1 for m in messages if m["role"] == "user")})
