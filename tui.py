@@ -11,8 +11,10 @@ from rich.padding import Padding
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Vertical, ScrollableContainer
 from textual.message import Message
-from textual.widgets import Label, RichLog, Static, TextArea
+from textual.screen import ModalScreen
+from textual.widgets import Input, Label, RichLog, Static, TextArea
 
 from agent import AgentInterrupted, _run_reflect, agent_turn, load_messages, save_messages
 from logger import log, start_session
@@ -21,6 +23,7 @@ from tools_router import analyze_routing, format_routing_stats
 from tools_session import all_sessions_token_usage, session_token_usage
 from session_history import add_to_history, get_most_recent, get_all, get_by_session_id
 import compactor
+from diff_display import create_file_diff, DiffLine
 
 # ---------------------------------------------------------------------------
 # Color Palettes
@@ -131,6 +134,10 @@ _ACCENT = lambda: _get_color("ACCENT")
 # ---------------------------------------------------------------------------
 _ANIMATION_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
+# Mouse-tracking escape sequences — disable to let the terminal do native selection
+_MOUSE_TRACKING_OFF = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
+_MOUSE_TRACKING_ON  = "\x1b[?1000h\x1b[?1003h\x1b[?1006h"
+
 _TOOL_SYNONYMS = {
     "read": ["reading", "scanning", "parsing", "loading", "opening"],
     "write": ["writing", "creating", "saving", "generating", "composing"],
@@ -152,16 +159,31 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/clear",     "clear chat history"),
     ("/exit",      "exit the application"),
     ("/new",       "start a fresh session"),
-    ("/session",   "switch to or create a session"),
-    ("/sessions",  "list all sessions"),
+    ("/session",   "interactive session picker (or /session <name> to switch directly)"),
     ("/restore",   "restore last closed session (or /restore <session-id>)"),
     ("/usage",     "token usage — this session"),
     ("/usage all", "token usage — all sessions"),
     ("/cwd",       "change working directory"),
     ("/palette",   "change theme (none/default/dark/light/dark_blue/light_blue)"),
     ("/pmon",      "toggle prompt monitoring (warns on vague prompts)"),
-    ("/compact",   "compact conversation now (or /compact on|off|status)"),
+    ("/compact",   "compact conversation now"),
+    ("/compact on", "enable auto-compaction"),
+    ("/compact off", "disable auto-compaction"),
+    ("/compact status", "show compaction status"),
+    ("/copy",      "copy last response to clipboard  (or ctrl+y)"),
+    ("/select",    "toggle select mode for mouse text selection  (or f2)"),
 ]
+
+def _has_subcommands(cmd: str) -> bool:
+    """Check if a command has sub-commands in the SLASH_COMMANDS list."""
+    # Commands with dynamic arguments (not fixed sub-commands) should not be treated as hierarchical
+    DYNAMIC_ARG_COMMANDS = {"/session", "/palette", "/restore", "/cwd"}
+    if cmd in DYNAMIC_ARG_COMMANDS:
+        return False
+    
+    # A command has sub-commands if there's another command that starts with "cmd "
+    cmd_prefix = cmd.rstrip() + " "
+    return any(other_cmd.startswith(cmd_prefix) for other_cmd, _ in SLASH_COMMANDS if other_cmd != cmd)
 
 def _completions(prefix: str) -> list[tuple[str, str]]:
     p = prefix.lower()
@@ -178,6 +200,294 @@ def _key_arg(tool_name: str, args: dict) -> str:
         cmd = args.get("cmd", "")
         return (cmd[:60] + "…") if len(cmd) > 60 else cmd
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Session picker helpers
+# ---------------------------------------------------------------------------
+
+def _time_ago(mtime: float) -> str:
+    """Convert a Unix mtime to a concise human-readable string."""
+    import time as _t
+    delta = _t.time() - mtime
+    if delta < 60:     return "just now"
+    if delta < 3600:   return f"{int(delta/60)}m ago"
+    if delta < 86400:  return f"{int(delta/3600)}h ago"
+    if delta < 604800: return f"{int(delta/86400)}d ago"
+    return f"{int(delta/604800)}w ago"
+
+
+def _session_preview(session_path) -> tuple[int, str]:
+    """Return (turn_count, last_user_message_preview) from a session's messages file."""
+    import json as _j
+    mp = session_path.with_suffix(".messages.json")
+    if not mp.exists():
+        return 0, ""
+    try:
+        data = _j.loads(mp.read_text())
+        if not isinstance(data, list):
+            return 0, ""
+        turns, last_msg = 0, ""
+        for msg in data:
+            if msg.get("role") == "user":
+                c = msg.get("content", "")
+                if isinstance(c, str) and c.strip():
+                    turns += 1
+                    last_msg = c.strip().replace("\n", " ")
+        return turns, last_msg[:80]
+    except Exception:
+        return 0, ""
+
+
+def _gather_session_metas(sessions_dir, current_id: str) -> list[dict]:
+    """Collect metadata for all sessions in sessions_dir, sorted newest first."""
+    paths = sorted(
+        [p for p in sessions_dir.glob("*.jsonl") if not p.name.startswith(".")],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    metas = []
+    for path in paths:
+        mtime = path.stat().st_mtime
+        turns, last_msg = _session_preview(path)
+        try:
+            cost = session_token_usage(path)["cost_usd"]
+        except Exception:
+            cost = 0.0
+        metas.append({
+            "id":         path.stem,
+            "mtime":      mtime,
+            "turns":      turns,
+            "last_msg":   last_msg,
+            "cost":       cost,
+            "is_current": path.stem == current_id,
+        })
+    return metas
+
+
+# ---------------------------------------------------------------------------
+# Session picker CSS + screen
+# ---------------------------------------------------------------------------
+
+def _get_session_picker_css() -> str:
+    return f"""
+    SessionPickerScreen {{
+        align: center middle;
+    }}
+    #picker-box {{
+        width: 96%;
+        max-width: 120;
+        height: 85%;
+        background: {_BG2()};
+        border: solid {_ACCENT()};
+    }}
+    #picker-title {{
+        height: 1;
+        background: {_ACCENT()};
+        color: {_BG()};
+        padding: 0 1;
+        text-style: bold;
+    }}
+    #picker-filter {{
+        height: 3;
+        background: {_BG()};
+        border: none;
+        border-bottom: solid {_DIM()};
+        color: {_FG()};
+        padding: 0 1;
+    }}
+    #picker-filter:focus {{
+        border-bottom: solid {_ACCENT()};
+    }}
+    #picker-scroll {{
+        height: 1fr;
+        background: {_BG2()};
+    }}
+    #picker-list {{
+        height: auto;
+        background: {_BG2()};
+        padding: 0 0 0 0;
+    }}
+    #picker-help {{
+        height: 1;
+        background: {_BG2()};
+        color: {_DIM()};
+        padding: 0 1;
+        border-top: solid {_DIM()};
+    }}
+    """
+
+
+class SessionPickerInput(Input):
+    """Custom Input that passes navigation keys to parent screen."""
+    
+    async def _on_key(self, event: events.Key) -> None:
+        """Pass escape, up, down, enter to parent screen for navigation."""
+        # Navigation keys should not be handled by Input - let them bubble to parent
+        if event.key in ("escape", "up", "down", "enter"):
+            return  # Don't handle, let parent screen handle
+        # For all other keys, call parent Input's handler
+        await super()._on_key(event)
+
+
+class SessionPickerScreen(ModalScreen):
+    """Claude Code-style interactive session picker."""
+
+    BINDINGS = [
+        Binding("escape", "cancel",      show=False, priority=True),
+        Binding("up",     "cursor_up",   show=False, priority=True),
+        Binding("down",   "cursor_down", show=False, priority=True),
+        Binding("enter",  "confirm",     show=False, priority=True),
+    ]
+
+    def __init__(self, metas: list[dict]) -> None:
+        SessionPickerScreen.DEFAULT_CSS = _get_session_picker_css()
+        super().__init__()
+        self._all_metas = metas
+        self._displayed: list[dict | None] = []  # None = "new session" sentinel
+        self._cursor = 0
+        self._filter = ""
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        f = self._filter.lower()
+        filtered = [
+            m for m in self._all_metas
+            if not f or f in m["id"].lower() or f in (m["last_msg"] or "").lower()
+        ]
+        self._displayed = [None] + filtered
+        self._cursor = max(0, min(self._cursor, len(self._displayed) - 1))
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="picker-box"):
+            yield Label(
+                "  SESSIONS  ·  ↑↓ navigate  ·  Enter open  ·  type to filter  ·  Esc stay",
+                id="picker-title",
+            )
+            yield SessionPickerInput(placeholder="  filter...", id="picker-filter")
+            with ScrollableContainer(id="picker-scroll"):
+                yield Static("", id="picker-list")
+            yield Label(
+                "  id                    age         turns  cost     last message",
+                id="picker-help",
+            )
+
+    def on_mount(self) -> None:
+        self._render_list()
+        self.query_one(Input).focus()
+
+    def _render_list(self) -> None:
+        widget = self.query_one("#picker-list", Static)
+        if not self._displayed:
+            widget.update(Text("  (nothing matches)", style=_DIM()))
+            return
+
+        lines = Text()
+        for i, item in enumerate(self._displayed):
+            sel   = (i == self._cursor)
+            arrow = "▶ " if sel else "  "
+
+            if item is None:
+                icon = "✦"
+                row = Text.assemble(
+                    (f"  {arrow}", f"bold {_ACCENT() if sel else _DIM()}"),
+                    (f"{icon} new session", f"bold {_USER() if sel else _FG()}"),
+                )
+            else:
+                sid      = item["id"]
+                age      = _time_ago(item["mtime"])
+                turns_s  = f"{item['turns']}t"
+                cost_s   = f"${item['cost']:.3f}"
+                preview  = (item["last_msg"] or "")[:50]
+                mark     = " ←" if item["is_current"] else ""
+                id_color = _ACCENT() if item["is_current"] else _FG()
+
+                if sel:
+                    row = Text.assemble(
+                        (f"  {arrow}", f"bold {_ACCENT()}"),
+                        (f"{sid:<20}", f"bold {id_color}"),
+                        (f"  {age:<10}", _DIM()),
+                        (f"  {turns_s:<6}", _DIM()),
+                        (f"  {cost_s:<8}", _OK()),
+                        (f"  {preview}", _FG()),
+                        (mark, f"bold {_ACCENT()}"),
+                    )
+                else:
+                    row = Text.assemble(
+                        (f"  {arrow}", _DIM()),
+                        (f"{sid:<20}", id_color),
+                        (f"  {age:<10}", _DIM()),
+                        (f"  {turns_s:<6}", _DIM()),
+                        (f"  {cost_s:<8}", _DIM()),
+                        (f"  {preview}", _DIM()),
+                        (mark, _ACCENT()),
+                    )
+
+            lines.append_text(row)
+            if i < len(self._displayed) - 1:
+                lines.append("\n")
+
+        widget.update(lines)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._filter = event.value
+        self._cursor = 0
+        self._rebuild()
+        self._render_list()
+
+    def on_key(self, event: events.Key) -> None:
+        """Handle key events at screen level."""
+        if event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            # Find and return to current session
+            current = next((m["id"] for m in self._all_metas if m.get("is_current")), None)
+            self.dismiss(current)
+        elif event.key == "up":
+            event.prevent_default()
+            event.stop()
+            if self._cursor > 0:
+                self._cursor -= 1
+                self._render_list()
+        elif event.key == "down":
+            event.prevent_default()
+            event.stop()
+            if self._cursor < len(self._displayed) - 1:
+                self._cursor += 1
+                self._render_list()
+        elif event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            if not self._displayed:
+                self.dismiss(None)
+                return
+            item = self._displayed[self._cursor]
+            self.dismiss("__new__" if item is None else item["id"])
+        else:
+            # Pass unhandled keys to parent
+            super().on_key(event)
+
+    def action_cancel(self) -> None:
+        """Cancel action - return to current session."""
+        current = next((m["id"] for m in self._all_metas if m.get("is_current")), None)
+        self.dismiss(current)
+
+    def action_cursor_up(self) -> None:
+        if self._cursor > 0:
+            self._cursor -= 1
+            self._render_list()
+
+    def action_cursor_down(self) -> None:
+        if self._cursor < len(self._displayed) - 1:
+            self._cursor += 1
+            self._render_list()
+
+    def action_confirm(self) -> None:
+        if not self._displayed:
+            self.dismiss(None)
+            return
+        item = self._displayed[self._cursor]
+        self.dismiss("__new__" if item is None else item["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +555,14 @@ class PromptEditor(TextArea):
     def _on_key(self, event: events.Key) -> None:
         """Intercept keys before TextArea's default handling."""
         if event.key == "enter":
+            # If autocomplete has matches, select the highlighted one
+            current_completions = getattr(self.app, "_current_completions", [])
+            if current_completions:
+                event.prevent_default()
+                event.stop()
+                self.app.run_worker(self.app._select_completion(), exclusive=False)
+                return
+            # Otherwise submit the prompt
             event.prevent_default()
             event.stop()
             text = self.text.strip()
@@ -287,6 +605,13 @@ class PromptEditor(TextArea):
                 else:
                     self.load_text(self._history[self._history_index])
                 self.move_cursor(self.document.end)
+        elif event.key == "escape":
+            # Hide autocomplete on Escape
+            if getattr(self.app, "_current_completions", []):
+                event.prevent_default()
+                event.stop()
+                self.app._hide_autocomplete()
+                return
         elif event.key == "shift+enter":
             event.prevent_default()
             event.stop()
@@ -421,6 +746,8 @@ class MimicodeApp(App):
         Binding("ctrl+d", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+c", "interrupt", "Interrupt", show=False, priority=True),
         Binding("escape", "interrupt_restore", "Interrupt+restore", show=False, priority=True),
+        Binding("ctrl+y", "copy_last", "Copy", show=False, priority=True),
+        Binding("f2", "toggle_select_mode", "Select", show=False),
     ]
 
     def __init__(self, session_id: str | None = None) -> None:
@@ -440,16 +767,20 @@ class MimicodeApp(App):
         self._last_tool_name: str = ""
         self._last_tool_args: dict = {}
         self._last_tool_result: str | None = None
+        self._last_tool_diff_info: dict | None = None
         self._animation_index: int = 0
         self._animation_timer: asyncio.Task | None = None
-        self._pmon_enabled: bool = True
+        self._pmon_enabled: bool = False
         self._pmon_warned: bool = False
         self._task_start_time: float | None = None
         self._tools_used_this_turn: bool = False
+        self._truncated_diffs: dict[str, dict] = {}  # path -> {file_diff, max_lines_shown}
+        self._last_bot_text: str = ""
+        self._select_mode: bool = False
 
     def compose(self) -> ComposeResult:
         yield Label(
-            f"mimicode  ·  {self.session.id}  ·  {self.cwd}  ·  shift+enter for newline  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+d quit",
+            f"mimicode  ·  {self.session.id}  ·  {self.cwd}  ·  shift+enter for newline  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+y copy  ·  f2 select  ·  ctrl+d quit",
             id="header",
         )
         yield RichLog(id="chat", markup=False, highlight=False, wrap=True, auto_scroll=True)
@@ -460,8 +791,13 @@ class MimicodeApp(App):
         yield Label("", id="footer-bar")
 
     def on_key(self, event: events.Key) -> None:
-        """Keep focus locked to the editor at all times."""
-        editor = self.query_one(PromptEditor)
+        """Keep focus locked to the editor at all times (main screen only)."""
+        if isinstance(self.screen, ModalScreen):
+            return
+        try:
+            editor = self.query_one(PromptEditor)
+        except Exception:
+            return
         # block tab/shift+tab from cycling focus to other widgets
         if event.key in ("tab", "shift+tab"):
             event.prevent_default()
@@ -485,6 +821,14 @@ class MimicodeApp(App):
 
     def _do_interrupt(self, restore: bool = False) -> None:
         """Immediately cancel the agent task and restore UI. No waiting."""
+        # Escape always exits select mode first
+        if self._select_mode:
+            self._select_mode = False
+            self._write_terminal_seq(_MOUSE_TRACKING_ON)
+            self._update_header()
+            self._sys("select mode off.")
+            self._log().scroll_end(animate=True)
+            return
         if not self.is_processing:
             if not restore:
                 pass
@@ -518,6 +862,63 @@ class MimicodeApp(App):
 
     def action_interrupt_restore(self) -> None:
         self._do_interrupt(restore=True)
+
+    def _copy_to_clipboard(self, text: str) -> bool:
+        """Write text to the system clipboard. Returns True on success."""
+        import subprocess
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["clip"], input=text, text=True, encoding="utf-8", check=True)
+            elif sys.platform == "darwin":
+                subprocess.run(["pbcopy"], input=text, text=True, check=True)
+            else:
+                try:
+                    subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, check=True)
+                except FileNotFoundError:
+                    subprocess.run(["xsel", "--clipboard", "--input"], input=text, text=True, check=True)
+            return True
+        except Exception:
+            return False
+
+    def action_copy_last(self) -> None:
+        """Copy the last bot response to the system clipboard (Ctrl+Y)."""
+        if not self._last_bot_text:
+            self._sys("nothing to copy yet")
+            self._log().scroll_end(animate=True)
+            return
+        if self._copy_to_clipboard(self._last_bot_text):
+            self._sys("copied to clipboard.")
+        else:
+            self._sys("copy failed — clipboard tool not available")
+        self._log().scroll_end(animate=True)
+
+    def _write_terminal_seq(self, seq: str) -> None:
+        """Write a raw VT escape sequence directly to the terminal device."""
+        try:
+            # sys.__stdout__ is the original stdout before any redirection
+            out = sys.__stdout__
+            if out is not None:
+                out.write(seq)
+                out.flush()
+        except Exception:
+            pass
+
+    def action_toggle_select_mode(self) -> None:
+        """Toggle select mode (F2): disable Textual mouse tracking so the terminal
+        can do native text selection with click-and-drag."""
+        self._select_mode = not self._select_mode
+        if self._select_mode:
+            self._write_terminal_seq(_MOUSE_TRACKING_OFF)
+            self._update_header()
+            self._sys(
+                "SELECT MODE  —  drag to select · Ctrl+C or right-click to copy"
+                " · F2 or Esc to return"
+            )
+        else:
+            self._write_terminal_seq(_MOUSE_TRACKING_ON)
+            self._update_header()
+            self._sys("select mode off.")
+        self._log().scroll_end(animate=True)
 
     # -----------------------------------------------------------------------
     # Streaming event handler
@@ -574,9 +975,18 @@ class MimicodeApp(App):
         elif event_type == "tool_exec_result":
             output   = data["output"]
             is_error = data["is_error"]
+            diff_info = data.get("diff_info")
             args     = dict(self._last_tool_args)
             args["_is_error"] = is_error
             self._last_tool_result = output
+            self._last_tool_diff_info = diff_info
+            
+            # Render tool result immediately with diff
+            self._tool_call(self._last_tool_name, self._last_tool_args)
+            self._tool_result(output, is_error, diff_info)
+            self._log().scroll_end(animate=True)
+            
+            # Update activity widget
             self._set_activity(self._last_tool_name, args, result=output)
     
     def _render_accumulated_text(self) -> None:
@@ -594,11 +1004,15 @@ class MimicodeApp(App):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         text = event.text_area.text
         box  = self.query_one(AutocompleteBox)
+        
+        # If not processing and starts with '/', search for matches
         if self.is_processing or not text.startswith("/"):
             self._current_completions = []
             self._autocomplete_selected = 0
             box.hide()
             return
+        
+        # Get the text after the slash
         if text.startswith("/session "):
             partial = text[len("/session "):]
             matches = self._session_completions(partial)
@@ -610,28 +1024,62 @@ class MimicodeApp(App):
                 if name.startswith(partial)
             ]
         else:
+            # For regular commands, match the prefix
             matches = _completions(text.strip())
+        
+        # Update completions and reset selection to first match
         if matches != self._current_completions:
             self._autocomplete_selected = 0
         self._current_completions = matches
-        box.show_completions(matches, self._autocomplete_selected)
+        
+        # Show or hide based on matches
+        if matches:
+            box.show_completions(matches, self._autocomplete_selected)
+        else:
+            box.hide()
 
     def _navigate_completion(self, direction: int) -> None:
+        """Navigate to next/previous completion and update display."""
         if not self._current_completions:
             return
         self._autocomplete_selected = (self._autocomplete_selected + direction) % len(self._current_completions)
+        # Update the display with new selection highlighted
         self.query_one(AutocompleteBox).show_completions(self._current_completions, self._autocomplete_selected)
+    
+    async def _select_completion(self) -> None:
+        """Submit or navigate into the currently selected completion."""
+        if not self._current_completions:
+            return
+        selected_cmd = self._current_completions[self._autocomplete_selected][0]
+        editor = self.query_one(PromptEditor)
+        
+        # Check if this command has sub-commands
+        if _has_subcommands(selected_cmd):
+            # Navigate into sub-commands: fill the command with a trailing space
+            editor.load_text(selected_cmd + " ")
+            # The on_text_area_changed will trigger and show sub-command completions
+        else:
+            # No sub-commands: execute the command
+            self._hide_autocomplete()
+            
+            # Special handling for commands that need async context
+            if selected_cmd.strip().lower() == "/session":
+                editor.load_text("")
+                await self._open_session_picker()
+            else:
+                editor.load_text("")
+                self.post_message(editor.Submitted(editor, selected_cmd))
+    
+    def _hide_autocomplete(self) -> None:
+        """Hide the autocomplete box and clear state."""
+        self._current_completions = []
+        self._autocomplete_selected = 0
+        self.query_one(AutocompleteBox).hide()
 
     def on_prompt_editor_tab_pressed(self, event: PromptEditor.TabPressed) -> None:
         if not self._current_completions:
             return
-        selected_cmd = self._current_completions[self._autocomplete_selected][0]
-        editor  = self.query_one(PromptEditor)
-        editor.load_text(selected_cmd)
-        editor.move_cursor(editor.document.end)
-        self._current_completions = []
-        self._autocomplete_selected = 0
-        self.query_one(AutocompleteBox).hide()
+        self.run_worker(self._select_completion(), exclusive=False)
 
     # -----------------------------------------------------------------------
     # Chat write helpers — all use rich.text.Text, never raw markup strings
@@ -661,6 +1109,7 @@ class MimicodeApp(App):
     def _bot(self, text: str) -> None:
         if not text.strip():
             return
+        self._last_bot_text = text
         self._blank()
         
         # Write the bot indicator prefix
@@ -681,13 +1130,218 @@ class MimicodeApp(App):
             (parts, _DIM()),
         ))
 
-    def _tool_result(self, output: str, is_error: bool) -> None:
+    def _tool_result(self, output: str, is_error: bool, diff_info: dict | None = None) -> None:
         icon  = " ✗   " if is_error else " ✓   "
         color = _ERR() if is_error else _OK()
-        preview = output.replace("\n", "  ")[:120]
-        if len(output) > 120:
-            preview += f"…  ({len(output):,} chars)"
-        self._log().write(Text.assemble((icon, f"bold {color}"), (preview, _DIM())))
+        
+        # Skip redundant text output if we have a diff to show
+        if not (diff_info and not is_error):
+            preview = output.replace("\n", "  ")[:120]
+            if len(output) > 120:
+                preview += f"…  ({len(output):,} chars)"
+            self._log().write(Text.assemble((icon, f"bold {color}"), (preview, _DIM())))
+        else:
+            # Just show success checkmark
+            self._log().write(Text.assemble((icon, f"bold {color}"), ("File modified", _DIM())))
+        
+        # Display diff if available
+        if diff_info and not is_error:
+            self._render_diff(diff_info)
+    
+    def _render_diff(self, diff_info: dict, max_lines: int = 50) -> None:
+        """Render a code diff with line-by-line changes."""
+        try:
+            path = diff_info.get("path", "")
+            old_content = diff_info.get("old_content", "")
+            new_content = diff_info.get("new_content", "")
+            operation = diff_info.get("operation", "edit")
+            is_new_file = diff_info.get("is_new_file", False)
+            
+            # Generate diff
+            file_diff = create_file_diff(path, old_content, new_content, context=3)
+            
+            # Limit diff display for very large changes
+            total_lines = len(file_diff.lines)
+            display_lines = file_diff.lines[:max_lines]
+            truncated = total_lines > max_lines
+            
+            # Store for potential expansion
+            if truncated:
+                self._truncated_diffs[path] = {
+                    "file_diff": file_diff,
+                    "diff_info": diff_info,
+                    "max_lines_shown": max_lines
+                }
+            
+            # Display diff header
+            self._blank()
+            header = f"━━━ {path} ({file_diff.summary}) ━━━"
+            self._log().write(Text(header, style=f"bold {_ACCENT()}"))
+            
+            # Generate and show explanation at the top
+            self._blank()
+            explanation = self._generate_diff_explanation(file_diff, operation, is_new_file, old_content, new_content)
+            self._log().write(Text.assemble(
+                ("     ", ""),
+                ("💡 ", _ACCENT()),
+                (explanation, _DIM())
+            ))
+            self._blank()
+            
+            # Display diff lines
+            for diff_line in display_lines:
+                if diff_line.change_type == 'separator':
+                    self._log().write(Text("     ⋮", style=_DIM()))
+                    continue
+                
+                # Format line number
+                if diff_line.change_type == 'add':
+                    prefix = f" +{diff_line.line_num or '':>4} "
+                    line_style = _OK()
+                    symbol = "+"
+                elif diff_line.change_type == 'delete':
+                    prefix = f" -{diff_line.old_line_num or '':>4} "
+                    line_style = _ERR()
+                    symbol = "-"
+                else:  # context
+                    prefix = f"  {diff_line.line_num or '':>4} "
+                    line_style = _DIM()
+                    symbol = " "
+                
+                # Render the line
+                self._log().write(Text.assemble(
+                    (prefix, f"bold {line_style}"),
+                    (symbol + " ", line_style),
+                    (diff_line.content, _FG() if diff_line.change_type == 'context' else line_style)
+                ))
+            
+            if truncated:
+                remaining = total_lines - max_lines
+                self._blank()
+                self._log().write(Text.assemble(
+                    ("     ", ""),
+                    ("▼ ", _ACCENT()),
+                    (f"{remaining} more lines hidden. ", _DIM()),
+                    ("Type ", _DIM()),
+                    (f"'expand {path}'", f"italic {_ACCENT()}"),
+                    (" to view all or ", _DIM()),
+                    (f"'expand {path} +50'", f"italic {_ACCENT()}"),
+                    (" to show 50 more lines.", _DIM())
+                ))
+            
+            self._blank()
+        except Exception as e:
+            # Silently fail if diff rendering fails - don't break the UI
+            log("diff_render_error", {"error": str(e)})
+    
+    def _generate_diff_explanation(self, file_diff, operation: str, is_new_file: bool, 
+                                   old_content: str, new_content: str) -> str:
+        """Generate a human-readable explanation of what changed."""
+        from diff_display import compute_diff_stats
+        
+        additions, deletions, _ = compute_diff_stats(file_diff.lines)
+        
+        if is_new_file:
+            return f"Created new file with {additions} lines"
+        elif operation == "write":
+            if deletions == 0:
+                return f"Wrote {additions} lines to file"
+            else:
+                return f"Overwrote file: {additions} lines added, {deletions} lines removed"
+        else:  # edit
+            # Analyze what changed to give specific feedback
+            explanation_parts = []
+            
+            # Get the actual changed lines
+            added_lines = [line.content for line in file_diff.lines if line.change_type == 'add']
+            deleted_lines = [line.content for line in file_diff.lines if line.change_type == 'delete']
+            
+            # Basic stats
+            if additions > 0 and deletions > 0:
+                explanation_parts.append(f"Modified {max(additions, deletions)} line{'s' if max(additions, deletions) != 1 else ''}")
+            elif additions > 0:
+                explanation_parts.append(f"Added {additions} line{'s' if additions != 1 else ''}")
+            elif deletions > 0:
+                explanation_parts.append(f"Removed {deletions} line{'s' if deletions != 1 else ''}")
+            
+            # Try to identify what kind of change it was
+            if added_lines:
+                # Check for common patterns
+                first_added = added_lines[0].strip() if added_lines else ""
+                
+                if first_added.startswith("def ") or first_added.startswith("async def "):
+                    func_name = first_added.split("(")[0].replace("def ", "").replace("async ", "").strip()
+                    explanation_parts.append(f"— defined function '{func_name}'")
+                elif first_added.startswith("class "):
+                    class_name = first_added.split("(")[0].split(":")[0].replace("class ", "").strip()
+                    explanation_parts.append(f"— defined class '{class_name}'")
+                elif first_added.startswith("import ") or first_added.startswith("from "):
+                    explanation_parts.append(f"— added import statement")
+                elif any(kw in first_added for kw in ["return ", "yield ", "raise "]):
+                    explanation_parts.append(f"— modified control flow")
+                elif "=" in first_added and not first_added.strip().startswith("#"):
+                    var_name = first_added.split("=")[0].strip().split()[-1] if "=" in first_added else ""
+                    if var_name and var_name.replace("_", "").isalnum():
+                        explanation_parts.append(f"— set variable '{var_name}'")
+            
+            return " ".join(explanation_parts) if explanation_parts else "File modified"
+
+    def _handle_expand_diff(self, prompt: str) -> None:
+        """Handle 'expand <path> [+N]' command to show more diff lines."""
+        parts = prompt.split()
+        if len(parts) < 2:
+            self._sys("usage: expand <path> [+N]  (e.g., 'expand tools.py' or 'expand tools.py +50')")
+            self._log().scroll_end(animate=True)
+            return
+        
+        path = parts[1]
+        increment = 50  # default
+        
+        # Check for +N argument
+        if len(parts) >= 3:
+            try:
+                inc_str = parts[2].replace("+", "")
+                increment = int(inc_str)
+                if increment <= 0:
+                    raise ValueError
+            except (ValueError, IndexError):
+                self._sys(f"invalid increment: {parts[2]}  (use +N where N is a positive number)")
+                self._log().scroll_end(animate=True)
+                return
+        
+        # Find the diff
+        if path not in self._truncated_diffs:
+            self._sys(f"no truncated diff found for '{path}'")
+            self._sys("(diffs are only expandable for the most recent file changes)")
+            self._log().scroll_end(animate=True)
+            return
+        
+        diff_data = self._truncated_diffs[path]
+        current_max = diff_data["max_lines_shown"]
+        
+        # Check if we're already showing everything
+        total_lines = len(diff_data["file_diff"].lines)
+        if current_max >= total_lines:
+            self._sys(f"'{path}' is already fully expanded ({total_lines} lines)")
+            self._log().scroll_end(animate=True)
+            return
+        
+        # Calculate new max
+        new_max = min(current_max + increment, total_lines)
+        if new_max == total_lines:
+            self._sys(f"expanding '{path}' to show all {total_lines} lines...")
+        else:
+            self._sys(f"expanding '{path}' to show {new_max} of {total_lines} lines...")
+        
+        self._blank()
+        
+        # Re-render with new max
+        self._render_diff(diff_data["diff_info"], max_lines=new_max)
+        
+        # Update stored max
+        self._truncated_diffs[path]["max_lines_shown"] = new_max
+        
+        self._log().scroll_end(animate=True)
 
     def _sys(self, text: str) -> None:
         self._log().write(Text.assemble(("     ", ""), (text, _DIM())))
@@ -746,6 +1400,7 @@ class MimicodeApp(App):
         self._last_tool_name = ""
         self._last_tool_args = {}
         self._last_tool_result = None
+        self._last_tool_diff_info = None
         widget = self.query_one("#activity", Static)
         widget.update(Text(""))
         widget.remove_class("active")
@@ -796,10 +1451,15 @@ class MimicodeApp(App):
         self.refresh(layout=True, repaint=True)
         
     def _update_header(self) -> None:
-        self.query_one("#header", Label).update(
-            f"mimicode  ·  {self.session.id}  ·  {self.cwd}  ·  shift+enter for newline"
-            f"  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+d quit"
-        )
+        if self._select_mode:
+            self.query_one("#header", Label).update(
+                "[ SELECT MODE ]  drag to select · Ctrl+C or right-click to copy · F2 or Esc to exit"
+            )
+        else:
+            self.query_one("#header", Label).update(
+                f"mimicode  ·  {self.session.id}  ·  {self.cwd}  ·  shift+enter for newline"
+                f"  ·  ctrl+c interrupt  ·  esc interrupt+restore  ·  ctrl+y copy  ·  f2 select  ·  ctrl+d quit"
+            )
 
     def _session_completions(self, partial: str) -> list[tuple[str, str]]:
         sessions_dir = self.session.path.parent
@@ -911,6 +1571,49 @@ class MimicodeApp(App):
                 self._bot("\n".join(text_parts))
 
     # -----------------------------------------------------------------------
+    # Session management helpers
+    # -----------------------------------------------------------------------
+
+    def _do_new_session(self) -> None:
+        add_to_history(self.session.id)
+        self.session  = start_session()
+        self.messages = []
+        self._log().clear()
+        self._update_header()
+        self._update_footer()
+        self._sys(f"new session · {self.session.id}")
+        self._log().scroll_end(animate=True)
+
+    def _do_switch_session(self, sid: str) -> None:
+        if sid != self.session.id:
+            add_to_history(self.session.id)
+        self.session  = start_session(sid)
+        self.messages = load_messages(self.session.path)
+        self._log().clear()
+        self._update_header()
+        self._update_footer()
+        if self.messages:
+            self._render_history()
+            n = sum(1 for m in self.messages if m["role"] == "user" and isinstance(m.get("content"), str))
+            self._sys(f"switched · {sid} · {n} turns")
+        else:
+            self._sys(f"new session · {sid}")
+        self._log().scroll_end(animate=True)
+
+    async def _open_session_picker(self) -> None:
+        metas  = _gather_session_metas(self.session.path.parent, self.session.id)
+        result = await self.push_screen_wait(SessionPickerScreen(metas))
+        if result is None:
+            return
+        # If user pressed Esc (returned current session), just stay in current session
+        if result == self.session.id:
+            return
+        if result == "__new__":
+            self._do_new_session()
+        else:
+            self._do_switch_session(result)
+
+    # -----------------------------------------------------------------------
     # Slash commands
     # -----------------------------------------------------------------------
 
@@ -925,9 +1628,9 @@ class MimicodeApp(App):
                 "  /clear             clear chat history",
                 "  /exit              exit the application",
                 "  /new               start a fresh session",
-                "  /session <name>    switch to or create a session",
-                "  /sessions          list all sessions",
-                "  /restore [id]      restore last closed session (or specify session id)",
+                "  /session           interactive session picker (↑↓ navigate, type to filter)",
+                "  /session <name>    switch directly to a named session",
+                "  /restore [id]      restore last closed session",
                 "  /usage             token usage for this session",
                 "  /usage all         token usage across all sessions",
                 "  /route             show model routing stats (Haiku vs Sonnet)",
@@ -935,6 +1638,8 @@ class MimicodeApp(App):
                 "  /palette <name>    change theme (none/default/dark/light/dark_blue/light_blue)",
                 "  /pmon              toggle prompt monitoring (warns on vague prompts)",
                 "  /compact           compact older turns now (or /compact on|off|status)",
+                "  /copy              copy last response to clipboard  (also ctrl+y)",
+                "  /select            toggle select mode: drag to select, Ctrl+C to copy  (also f2)",
             ]:
                 self._sys(line)
             self._log().scroll_end(animate=True)
@@ -957,56 +1662,17 @@ class MimicodeApp(App):
             return True
 
         if cmd == "/new":
-            # Track current session closure before switching
-            old_session_id = self.session.id
-            add_to_history(old_session_id)
-            
-            self.session  = start_session()
-            self.messages = []
-            self._log().clear()
-            self._update_header()
-            self._update_footer()
-            self._sys(f"new session · {self.session.id}")
-            self._log().scroll_end(animate=True)
+            self._do_new_session()
             return True
 
         if cmd == "/session":
             if len(args) < 2:
-                self._sys("usage: /session <name>")
+                # no-arg /session is caught before _slash and opens the picker;
+                # reaching here means trailing whitespace — treat same as no arg
+                self._sys("tip: /session opens the session picker · /session <name> switches directly")
                 self._log().scroll_end(animate=True)
                 return True
-            sid = args[1]
-            
-            # Track current session closure before switching (only if different)
-            if sid != self.session.id:
-                old_session_id = self.session.id
-                add_to_history(old_session_id)
-            
-            self.session  = start_session(sid)
-            self.messages = load_messages(self.session.path)
-            self._log().clear()
-            self._update_header()
-            self._update_footer()
-            if self.messages:
-                self._render_history()
-                n = sum(1 for m in self.messages if m["role"] == "user" and isinstance(m.get("content"), str))
-                self._sys(f"switched to {sid} · {n} prior turns")
-            else:
-                self._sys(f"new session · {sid}")
-            self._log().scroll_end(animate=True)
-            return True
-
-        if cmd == "/sessions":
-            sessions_dir = self.session.path.parent
-            paths = sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-            self._blank()
-            self._sys("sessions (most recent first)")
-            self._blank()
-            for path in paths:
-                u   = session_token_usage(path)
-                cur = "  ←" if path.stem == self.session.id else ""
-                self._sys(f"  {path.stem:<24}  ${u['cost_usd']:.4f}{cur}")
-            self._log().scroll_end(animate=True)
+            self._do_switch_session(args[1])
             return True
 
         if cmd == "/restore":
@@ -1054,24 +1720,8 @@ class MimicodeApp(App):
                 self._log().scroll_end(animate=True)
                 return True
             
-            # Switch to the restored session
-            self.session  = start_session(session_id_to_restore)
-            self.messages = load_messages(self.session.path)
-            self._log().clear()
-            self._update_header()
-            self._update_footer()
-            
-            if self.messages:
-                self._render_history()
-                n = sum(1 for m in self.messages if m["role"] == "user" and isinstance(m.get("content"), str))
-                self._blank()
-                self._sys(f"restored session · {session_id_to_restore}")
-                self._sys(f"  {n} prior turns · closed: {entry['closed_at_str']}")
-            else:
-                self._blank()
-                self._sys(f"restored session · {session_id_to_restore}")
-            
-            self._log().scroll_end(animate=True)
+            self._sys(f"restoring session · {session_id_to_restore} · closed: {entry['closed_at_str']}")
+            self._do_switch_session(session_id_to_restore)
             return True
 
         if cmd == "/usage":
@@ -1192,6 +1842,14 @@ class MimicodeApp(App):
             self._log().scroll_end(animate=True)
             return True
 
+        if cmd == "/copy":
+            self.action_copy_last()
+            return True
+
+        if cmd == "/select":
+            self.action_toggle_select_mode()
+            return True
+
         if cmd == "/compact":
             sub = args[1].lower() if len(args) >= 2 else ""
             if sub == "on":
@@ -1237,6 +1895,16 @@ class MimicodeApp(App):
 
         self.query_one(AutocompleteBox).hide()
 
+        # Handle expand command for diffs
+        if prompt.strip().lower().startswith("expand "):
+            self._handle_expand_diff(prompt.strip())
+            return
+
+        # Session picker needs async — intercept before sync _slash()
+        if prompt.strip().lower() == "/session":
+            await self._open_session_picker()
+            return
+
         if prompt.startswith("/"):
             if not self._slash(prompt):
                 self._sys(f"unknown command: {prompt}  (try /help)")
@@ -1261,6 +1929,7 @@ class MimicodeApp(App):
         self._cancel_event.clear()
         self._current_text_blocks.clear()
         self._current_tool_blocks.clear()
+        self._truncated_diffs.clear()  # Clear old diff expansion state
         self._task_start_time = asyncio.get_event_loop().time()
         self._tools_used_this_turn = False
 

@@ -78,7 +78,10 @@ STYLE:
 - Prefer one targeted tool call over a broad one. Scope searches.
 - Tool output is capped at 100KB. If you hit that, your scope was too wide.
 - Be concise. Cite file:line where relevant.
-- Do NOT create markdown (.md) files to summarize what is happening. Respond directly to the user."""
+- Do NOT create markdown (.md) files to summarize what is happening. Respond directly to the user.
+- Add Diffs for different files with which files has been changed and which line has been added.
+- Remove redundant word usage like 'Now I will', 'Perfect! Now', etc when explaining what has been.
+"""
 
 TOOLS = [
     {
@@ -458,6 +461,7 @@ async def agent_turn(
                     "name": tu["name"],
                     "output": result.output,
                     "is_error": result.is_error,
+                    "diff_info": result.diff_info,
                 })
 
             results.append({

@@ -64,6 +64,8 @@ class ToolResult:
     truncated: bool = False
     timed_out: bool = False
     aborted: bool = False
+    # Diff information for file operations
+    diff_info: dict | None = None  # {path: str, old_content: str, new_content: str, operation: str}
 
 
 async def _kill(proc: asyncio.subprocess.Process) -> None:
@@ -186,13 +188,36 @@ async def write(path: str, content: str, cwd: str = ".") -> ToolResult:
     """create or overwrite a file. creates parent dirs. serialized per absolute path."""
     abs_path = _resolve(path, cwd)
     lock = _file_locks[str(abs_path)]
+    
+    # Check if file exists and read old content for diff
+    is_new_file = not abs_path.exists()
+    old_content = ""
+    
     async with lock:
+        if not is_new_file:
+            try:
+                old_content = abs_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                # If we can't read it, treat as new file
+                old_content = ""
+                is_new_file = True
+        
         try:
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_text(content, encoding="utf-8")
         except OSError as e:
             return ToolResult(output=f"[error] {e}", is_error=True)
-    return ToolResult(output=f"wrote {len(content)} bytes to {path}")
+    
+    return ToolResult(
+        output=f"wrote {len(content)} bytes to {path}",
+        diff_info={
+            "path": path,
+            "old_content": old_content,
+            "new_content": content,
+            "operation": "write",
+            "is_new_file": is_new_file
+        }
+    )
 
 
 async def edit(
@@ -260,7 +285,8 @@ async def edit(
         if not abs_path.exists():
             return ToolResult(output=f"[error] not found: {path}", is_error=True)
         try:
-            buffer = abs_path.read_text(encoding="utf-8")
+            original_content = abs_path.read_text(encoding="utf-8")
+            buffer = original_content
         except UnicodeDecodeError:
             return ToolResult(output=f"[error] binary file: {path}", is_error=True)
 
@@ -291,8 +317,17 @@ async def edit(
         abs_path.write_text(buffer, encoding="utf-8")
 
     if len(applied_lines) == 1:
-        return ToolResult(output=f"edited {path} at line {applied_lines[0]}")
-    lines_str = ", ".join(str(n) for n in applied_lines)
+        result_msg = f"edited {path} at line {applied_lines[0]}"
+    else:
+        lines_str = ", ".join(str(n) for n in applied_lines)
+        result_msg = f"edited {path}: {len(applied_lines)} changes at lines {lines_str}"
+    
     return ToolResult(
-        output=f"edited {path}: {len(applied_lines)} changes at lines {lines_str}"
+        output=result_msg,
+        diff_info={
+            "path": path,
+            "old_content": original_content,
+            "new_content": buffer,
+            "operation": "edit"
+        }
     )
